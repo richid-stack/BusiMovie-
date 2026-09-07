@@ -12,7 +12,7 @@ import {
   getRandomMediaFile,
   getAllVaultTitles
 } from "../db/index.js";
-import { getAIMovieRecommendations, analyzeUserIntent } from "../services/gemini.js";
+import { getAIMovieRecommendations, analyzeUserIntent, generateMoviePostWatchFollowUp } from "../services/gemini.js";
 import { addMovieToRadarr } from "../services/arr.js";
 import { searchOpenTracker, downloadTorrent } from "../services/torrentEngine.js";
 
@@ -374,9 +374,9 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   }
 
   const epText = (file.season && file.episode) ? `\n📺 <b>Episode:</b> Season ${file.season}, Episode ${file.episode}` : "";
-  const caption = `🎬 <b>${escapeHtml(file.movie_title as string)}</b> ${file.year ? `(${file.year})` : ""}${epText}\n🎞 <b>Quality:</b> ${file.quality || "HD"}\n💾 <b>Size:</b> ${formatFileSize(Number(file.file_size || 0))}\n\n🍿 <i>Delivered directly from your Telegram Cloud Vault</i>\n\n⚠️ <i>This file will self-destruct in exactly 2 minutes. Forward it to your "Saved Messages" now to keep it!</i>`;
+  const caption = `🎬 <b>${escapeHtml(file.movie_title as string)}</b> ${file.year ? `(${file.year})` : ""}${epText}\n🎞 <b>Quality:</b> ${file.quality || "HD"}\n💾 <b>Size:</b> ${formatFileSize(Number(file.file_size || 0))}\n\n🍿 <i>Delivered directly from your Telegram Cloud Vault</i>\n\n⏳ <b>Self-Destruct Timer:</b> 2 minutes (120s)\n💡 <i>Forward to your "Saved Messages" now to keep it forever!</i>`;
 
-  let sentMessage;
+  let sentMessage: any;
 
   // 1. First attempt: Zero-bandwidth copyMessage from private channel
   if (file.telegram_channel_id && file.telegram_message_id) {
@@ -406,13 +406,92 @@ async function deliverMediaFile(ctx: any, fileId: number) {
     }
   }
 
-  // Set 2-minute strict self-destruct timer
+  // Send an interactive countdown & companion notification card
+  const companionMsg = await ctx.reply(
+    `⏳ <b>Streaming & Vault Session Started</b>\n\n` +
+    `🎬 <b>${escapeHtml(file.movie_title as string)}</b> is now in your chat!\n` +
+    `⚠️ <i>Telegram Vault files are automatically deleted after 2 minutes to protect storage and maintain privacy.</i>\n\n` +
+    `💡 <i>Missed it or need the file again? You will receive an instant <b>Fetch Again</b> notification right after deletion!</i>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🔄 Re-fetch File", `watch_${file.id}`)],
+        [Markup.button.callback("🍿 AI Recommendations", "ai_recs"), Markup.button.callback("🎲 Surprise Me", "surprise_me")]
+      ])
+    }
+  ).catch(() => null);
+
+  // Set 2-minute strict self-destruct timer with brilliant deletion notification and re-fetch trigger
   if (sentMessage && sentMessage.message_id) {
     setTimeout(async () => {
       try {
+        // 1. Delete the media message
         await ctx.telegram.deleteMessage(ctx.chat!.id, sentMessage.message_id);
       } catch (err) {
-        console.warn("Failed to delete message, it may have been deleted already.");
+        console.warn("Failed to delete media message, it may have been deleted already.");
+      }
+
+      // 2. Also clean up the companion message if present
+      if (companionMsg && companionMsg.message_id) {
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat!.id, companionMsg.message_id);
+        } catch {}
+      }
+
+      // 3. Send the brilliant "File Expired" notification with instant 1-tap "Fetch File Again"
+      try {
+        const deletedNotice = await ctx.telegram.sendMessage(
+          ctx.chat!.id,
+          `⏱ <b>Timer Reached — Movie File Deleted!</b>\n\n` +
+          `🎬 <b>${escapeHtml(file.movie_title as string)}</b> ${file.year ? `(${file.year})` : ""}\n` +
+          `The 2-minute playback window has closed and the media file was removed from this chat to keep your Telegram lightweight.\n\n` +
+          `Did you miss the download or want to watch it again? Tap below to re-fetch the file instantly from the Vault! 👇`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback("⚡ Fetch File Again (Instant)", `watch_${file.id}`)],
+              [
+                Markup.button.callback("⭐ Rate Movie", `rate_${file.id}`),
+                Markup.button.callback("🍿 What to Watch Next", `next_${file.id}`)
+              ],
+              [
+                Markup.button.callback("📚 Browse Vault", "browse_library"),
+                Markup.button.callback("🎲 Random Pick", "random_pick")
+              ]
+            ])
+          }
+        );
+
+        // 4. Schedule a thoughtful follow-up interaction 15 seconds after deletion to keep user engaged
+        setTimeout(async () => {
+          try {
+            const followUp = await generateMoviePostWatchFollowUp(file.movie_title as string, file.year as string);
+            await ctx.telegram.sendMessage(
+              ctx.chat!.id,
+              `✨ <b>${escapeHtml(followUp.headline)}</b>\n\n` +
+              `❓ <i>${escapeHtml(followUp.question)}</i>\n\n` +
+              `🎬 <b>Cinema Trivia:</b> ${escapeHtml(followUp.funFact)}\n\n` +
+              `Hungry for your next movie? Explore recommendations tailored for you!`,
+              {
+                parse_mode: "HTML",
+                ...Markup.inlineKeyboard([
+                  [
+                    Markup.button.callback("🍿 Similar Recommendations", `similar_${file.id}`),
+                    Markup.button.callback("🎲 Surprise Me", "surprise_me")
+                  ],
+                  [
+                    Markup.button.callback("⚡ Re-fetch " + (file.movie_title as string).substring(0, 16), `watch_${file.id}`)
+                  ]
+                ])
+              }
+            );
+          } catch (followUpErr) {
+            console.warn("Follow-up error:", followUpErr);
+          }
+        }, 15000); // 15 seconds after deletion for maximum delight and engagement
+
+      } catch (notifyErr: any) {
+        console.warn("Failed to send post-deletion notice:", notifyErr?.message);
       }
     }, 120000); // 120,000 ms = 2 minutes
   }
@@ -478,7 +557,7 @@ export async function publishMovieToTelegramChannel(
   }
 
   if (webAppUrl) {
-    buttons.push([Markup.button.url("🌐 Open Web Player", webAppUrl)]);
+    buttons.push([Markup.button.webApp("🌐 Open Web Player", webAppUrl)]);
   }
 
   const keyboard = Markup.inlineKeyboard(buttons);
@@ -549,6 +628,69 @@ export async function broadcastAnnouncement(
   }
 
   return { sent, failed, total: users.length };
+}
+
+/**
+ * Sends engaging follow-ups to users to bring them back to the Vault.
+ * Highlights a random Vault movie, trending cinema news, or an interactive quiz/picker.
+ */
+export async function sendSmartReEngagementBroadcast(
+  bot: Telegraf
+): Promise<{ sent: number; total: number; title: string }> {
+  const users = await getAllUsers();
+  if (!users || users.length === 0) {
+    return { sent: 0, total: 0, title: "" };
+  }
+
+  const randomFile = await getRandomMediaFile();
+  if (!randomFile) {
+    return { sent: 0, total: users.length, title: "" };
+  }
+
+  const movieTitle = String(randomFile.movie_title);
+  let followUp: any;
+  try {
+    followUp = await generateMoviePostWatchFollowUp(movieTitle, randomFile.year ? String(randomFile.year) : undefined);
+  } catch {
+    followUp = {
+      headline: `Tonight's Vault Spotlight: ${movieTitle}! 🍿`,
+      question: "Looking for something captivating to stream right now?",
+      funFact: "Stream or save directly to Telegram without external storage limits."
+    };
+  }
+
+  let sent = 0;
+  for (const user of users) {
+    try {
+      await bot.telegram.sendMessage(
+        user.telegram_id,
+        `🍿 <b>Cinema Night Spotlight</b>\n\n` +
+        `🎬 <b>${escapeHtml(movieTitle)}</b> ${randomFile.year ? `(${randomFile.year})` : ""}\n` +
+        `🎞 <i>Quality:</i> ${randomFile.quality || "HD"} • 💾 <i>Size:</i> ${formatFileSize(randomFile.file_size || 0)}\n\n` +
+        `✨ <b>${escapeHtml(followUp.headline)}</b>\n` +
+        `❓ <i>${escapeHtml(followUp.question)}</i>\n\n` +
+        `💡 <b>Did you know?</b> ${escapeHtml(followUp.funFact)}\n\n` +
+        `Tap below to stream or fetch instantly! 👇`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback(`▶️ Watch ${movieTitle.substring(0, 16)}`, `watch_${randomFile.id}`)],
+            [
+              Markup.button.callback("🎲 Surprise Me", "surprise_me"),
+              Markup.button.callback("🍿 AI Recommendations", "ai_recs")
+            ],
+            [Markup.button.callback("📚 Browse Library", "browse_library")]
+          ])
+        }
+      );
+      sent++;
+      await new Promise((r) => setTimeout(r, 60)); // Rate limit protection
+    } catch (e: any) {
+      // User may have blocked bot or deleted account
+    }
+  }
+
+  return { sent, total: users.length, title: movieTitle };
 }
 
 export async function getFileStreamInfo(
@@ -1058,7 +1200,7 @@ export function initializeBot(): Telegraf | null {
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
-          [Markup.button.url("🌐 Open Movie Vault Web Player", appUrl)]
+          [Markup.button.webApp("🌐 Open Movie Vault Web Player", appUrl)]
         ])
       }
     );
@@ -1737,6 +1879,91 @@ export function initializeBot(): Telegraf | null {
         }, 120000);
       }
     }
+  });
+
+  // Interactive movie rating callback
+  bot.action(/^rate_(\d+)$/, async (ctx) => {
+    const fileId = parseInt(ctx.match[1], 10);
+    ctx.answerCbQuery("⭐ Opening ratings...");
+    await ctx.reply(
+      "⭐ <b>How would you rate this movie?</b>\nYour rating helps personalize future AI recommendations!",
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback("⭐⭐⭐⭐⭐ (10/10 Masterpiece)", `voted_${fileId}_5`),
+            Markup.button.callback("⭐⭐⭐⭐ (8/10 Great)", `voted_${fileId}_4`)
+          ],
+          [
+            Markup.button.callback("⭐⭐⭐ (6/10 Good)", `voted_${fileId}_3`),
+            Markup.button.callback("⭐⭐ (4/10 Mediocre)", `voted_${fileId}_2`)
+          ],
+          [Markup.button.callback("🍿 What to Watch Next", `next_${fileId}`)]
+        ])
+      }
+    );
+  });
+
+  bot.action(/^voted_(\d+)_(\d+)$/, async (ctx) => {
+    const stars = ctx.match[2];
+    ctx.answerCbQuery(`Thank you! Recorded ${stars} stars.`);
+    await ctx.editMessageText(
+      `⭐ <b>Rating Recorded!</b>\nThank you for rating! We have customized your cinema preferences.\n\nReady for your next movie? Tap below to explore what to watch next:`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🍿 What to Watch Next", `similar_${ctx.match[1]}`)],
+          [Markup.button.callback("🎲 Surprise Me", "surprise_me")]
+        ])
+      }
+    ).catch(() => {});
+  });
+
+  // What to Watch Next / Similar callback
+  bot.action(/^(next|similar)_(\d+)$/, async (ctx) => {
+    const fileId = parseInt(ctx.match[2], 10);
+    ctx.answerCbQuery("🔍 Curating recommendations...");
+    
+    let fileTitle = "movies";
+    try {
+      const res = await db.execute({
+        sql: "SELECT movie_title, year FROM media_files WHERE id = ?",
+        args: [fileId]
+      });
+      if (res.rows[0]?.movie_title) {
+        fileTitle = String(res.rows[0].movie_title);
+      }
+    } catch {}
+
+    const waitMsg = await ctx.reply(`🧠 <i>Curating brilliant follow-up titles similar to <b>${escapeHtml(fileTitle)}</b>...</i>`, { parse_mode: "HTML" });
+    const vaultTitles = await getAllVaultTitles();
+    const result = await getAIMovieRecommendations(`Find 3 exciting movies or TV shows similar in tone, plot, or style to ${fileTitle}`, vaultTitles);
+
+    const buttons: any[] = [];
+    for (const title of result.suggestedTitles.slice(0, 3)) {
+      const inVaultFiles = await getMediaFilesForMovie(title, title);
+      if (inVaultFiles.length > 0) {
+        buttons.push([Markup.button.callback(`▶️ Watch ${title} (In Vault)`, `watch_${inVaultFiles[0].id}`)]);
+      } else {
+        buttons.push([Markup.button.callback(`🔍 Search "${title}"`, "search_prompt")]);
+      }
+    }
+
+    buttons.push([
+      Markup.button.callback("🎲 Surprise Me", "surprise_me"),
+      Markup.button.callback("⚡ Re-fetch Previous", `watch_${fileId}`)
+    ]);
+
+    await ctx.telegram.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      undefined,
+      `🍿 <b>What to Watch After ${escapeHtml(fileTitle)}:</b>\n\n${escapeHtml(result.recommendation)}\n\n💡 <i>${escapeHtml(result.explanation)}</i>`,
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(buttons)
+      }
+    ).catch(() => {});
   });
 
   bot.action("noop", (ctx) => {

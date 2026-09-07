@@ -27,6 +27,7 @@ import {
   recentTelegramUpdates,
   publishMovieToTelegramChannel,
   broadcastAnnouncement,
+  sendSmartReEngagementBroadcast,
   getFileStreamInfo,
   getBotWebhookInfo,
   setBotWebhook,
@@ -106,9 +107,17 @@ async function startServer() {
                 ]
               })
               .catch((err: any) => {
-                botActive = false;
-                botMode = "inactive";
-                console.error("Failed to run polling bot:", err?.message || err);
+                const errMsg = String(err?.message || err);
+                if (errMsg.includes("Conflict") && errMsg.includes("setWebhook")) {
+                  // A webhook was set (e.g. on production / Cloud Run), so polling was intentionally terminated
+                  botActive = true;
+                  botMode = "webhook";
+                  console.log("[Telegram] Polling terminated in favor of active Webhook mode.");
+                } else {
+                  botActive = false;
+                  botMode = "inactive";
+                  console.error("Failed to run polling bot:", errMsg);
+                }
               });
             console.log("[Telegram] Bot started in Long Polling mode with channel_post updates enabled.");
           }
@@ -149,6 +158,13 @@ async function startServer() {
     try {
       const info = await getBotWebhookInfo(bot);
       const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+      
+      // If Telegram reports a valid webhook registered, the bot is running in webhook mode
+      if (info?.url) {
+        botActive = true;
+        botMode = "webhook";
+      }
+
       res.json({
         active: botActive,
         mode: botMode,
@@ -505,9 +521,10 @@ async function startServer() {
       // If bot is active, send direct notice to user
       if (bot && reqRecord.telegram_id) {
         try {
+          const safeTitle = (reqRecord.title || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           await bot.telegram.sendMessage(
             reqRecord.telegram_id,
-            `🎉 <b>Great News! Your Requested Title is Ready!</b>\n\n🎬 <b>${reqRecord.title}</b> has been uploaded to the Vault!\nOpen the bot menu or search "${reqRecord.title}" to stream or download now!`,
+            `🎉 <b>Great News! Your Requested Title is Ready!</b>\n\n🎬 <b>${safeTitle}</b> has been uploaded to the Vault!\nOpen the bot menu or search "${safeTitle}" to stream or download now!`,
             { parse_mode: "HTML" }
           );
         } catch (sendErr: any) {
@@ -602,6 +619,31 @@ async function startServer() {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // Automated & On-Demand Smart Re-Engagement Follow-Up
+  app.post("/api/bot/trigger-followup", async (req, res) => {
+    try {
+      if (!bot) {
+        return res.status(400).json({ error: "Telegram bot is not configured or active." });
+      }
+      const result = await sendSmartReEngagementBroadcast(bot);
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Periodic intelligent re-engagement (Every 6 hours)
+  setInterval(async () => {
+    if (bot) {
+      try {
+        console.log("[Engagement] Running smart re-engagement spotlight check...");
+        await sendSmartReEngagementBroadcast(bot);
+      } catch (cronErr) {
+        console.warn("[Engagement] Follow-up check skipped:", cronErr);
+      }
+    }
+  }, 6 * 60 * 60 * 1000); // 6 hours
 
   // Phase 4: Media Streaming & Direct URL Info
   app.get("/api/media/:id/stream", async (req, res) => {

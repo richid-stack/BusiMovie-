@@ -252,3 +252,54 @@ Format your response clearly. Also at the very end, include a comma-separated li
     };
   }
 }
+
+/**
+ * Generates an engaging, cinephile follow-up notification or question
+ * after a user watches or streams a movie from the Vault.
+ */
+export async function generateMoviePostWatchFollowUp(
+  movieTitle: string,
+  year?: string
+): Promise<{ headline: string; question: string; funFact: string }> {
+  const fallback = {
+    headline: `Hope you enjoyed ${movieTitle}! 🍿`,
+    question: "How would you rate it out of 10, or did that ending catch you by surprise?",
+    funFact: "Check out the Vault library for similar high-voltage movies and hidden cinema gems!"
+  };
+
+  const ai = getAIClient();
+  if (!ai) return fallback;
+
+  try {
+    const prompt = `You are an engaging, witty cinema concierge for a Telegram Movie community.
+A user just downloaded or streamed the movie "${movieTitle}" ${year ? `(${year})` : ""}.
+Generate a captivating, brief post-watch follow-up (30-40 words total) in JSON format:
+{
+  "headline": "A catchy 1-line reaction to this specific movie",
+  "question": "An intriguing question about the plot, moral dilemma, or performance",
+  "funFact": "One mind-blowing behind-the-scenes trivia fact about this movie"
+}
+Output only pure JSON.`;
+
+    const response = await executeGeminiWithFallback(async (modelName) => {
+      return await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json"
+        }
+      });
+    });
+
+    const parsed = JSON.parse(response.text || "{}");
+    return {
+      headline: parsed.headline || fallback.headline,
+      question: parsed.question || fallback.question,
+      funFact: parsed.funFact || fallback.funFact
+    };
+  } catch (e) {
+    console.warn("Follow-up generation fallback used:", e);
+    return fallback;
+  }
+}
+
