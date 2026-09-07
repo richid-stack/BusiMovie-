@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "MediaFile": {
+      "title": "MediaFile",
+      "description": "Telegram media files and indexed movies in the vault",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "movie_id": { "type": "string" },
+        "movie_title": { "type": "string" },
+        "year": { "type": "string" },
+        "telegram_file_id": { "type": "string" },
+        "telegram_channel_id": { "type": "string" },
+        "telegram_message_id": { "type": "string" },
+        "file_name": { "type": "string" },
+        "file_size": { "type": "number" },
+        "quality": { "type": "string" },
+        "language": { "type": "string" },
+        "mime_type": { "type": "string" },
+        "season": { "type": "number" },
+        "episode": { "type": "number" },
+        "poster_url": { "type": "string" },
+        "trailer_url": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["movie_title"]
+    },
+    "Channel": {
+      "title": "Channel",
+      "description": "Telegram storage channels configured for the vault",
+      "type": "object",
+      "properties": {
+        "channel_id": { "type": "string" },
+        "title": { "type": "string" },
+        "username": { "type": "string" },
+        "is_active": { "type": "boolean" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["channel_id"]
+    },
+    "MovieRequest": {
+      "title": "MovieRequest",
+      "description": "User requests for movies not yet available",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "username": { "type": "string" },
+        "first_name": { "type": "string" },
+        "query": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["user_id", "query"]
+    },
+    "UserWatchHistory": {
+      "title": "UserWatchHistory",
+      "description": "Track which user streamed or downloaded which media file",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "file_id": { "type": "string" },
+        "movie_title": { "type": "string" },
+        "watched_at": { "type": "string" }
+      },
+      "required": ["user_id", "file_id"]
+    }
+  },
+  "firestore": {
+    "/media_files/{id}": {
+      "schema": "MediaFile",
+      "description": "Indexed movies and media items in the Telegram Movie Vault"
+    },
+    "/channels/{id}": {
+      "schema": "Channel",
+      "description": "Connected Telegram channels"
+    },
+    "/movie_requests/{id}": {
+      "schema": "MovieRequest",
+      "description": "User requests"
+    },
+    "/watch_history/{id}": {
+      "schema": "UserWatchHistory",
+      "description": "User streaming history"
+    }
+  }
+}

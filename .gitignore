@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+*.db
+*.db-journal
+movie-bot.db
+.env*
+!.env.example

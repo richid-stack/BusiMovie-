@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /media_files/{id} {
+      // Movie catalog can be viewed and indexed by web dashboard and Telegram bot
+      allow read, write: if true;
+    }
+
+    match /channels/{id} {
+      allow read, write: if true;
+    }
+
+    match /movie_requests/{id} {
+      allow read, write: if true;
+    }
+
+    match /watch_history/{id} {
+      allow read, write: if true;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

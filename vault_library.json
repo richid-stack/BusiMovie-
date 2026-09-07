@@ -1,0 +1,21 @@
+[
+  {
+    "id": 1,
+    "movie_id": "tt_1788661805088",
+    "movie_title": "Inception",
+    "year": "2010",
+    "telegram_file_id": "BAACAgIAAxkBAAIBDemo1080p",
+    "telegram_channel_id": "",
+    "telegram_message_id": "",
+    "file_name": "Inception.2010.1080p.BluRay.x264.mp4",
+    "file_size": 1610612736,
+    "quality": "1080p",
+    "language": "English",
+    "mime_type": "video/mp4",
+    "created_at": "2026-09-07 08:59:31",
+    "season": null,
+    "episode": null,
+    "poster_url": "https://m.media-amazon.com/images/M/MV5BMjAxMzY3NjcxNF5BMl5BanBnXkFtZTcwNTI5OTM0Mw@@._V1_QL75_UX380_CR0,0,380,562_.jpg",
+    "trailer_url": null
+  }
+]
