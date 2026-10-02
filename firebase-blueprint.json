@@ -63,6 +63,55 @@
         "watched_at": { "type": "string" }
       },
       "required": ["user_id", "file_id"]
+    },
+    "CrawlerTarget": {
+      "title": "CrawlerTarget",
+      "description": "Target Telegram channels and groups monitored by the autonomous userbot crawler",
+      "type": "object",
+      "properties": {
+        "channel_identifier": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string" },
+        "min_file_size_mb": { "type": "number" },
+        "quality_filter": { "type": "string" },
+        "last_crawled_at": { "type": "string" },
+        "total_files_found": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["channel_identifier", "title"]
+    },
+    "SearchBot": {
+      "title": "SearchBot",
+      "description": "External Telegram search bots queried on demand by the userbot",
+      "type": "object",
+      "properties": {
+        "bot_username": { "type": "string" },
+        "bot_type": { "type": "string" },
+        "command_template": { "type": "string" },
+        "status": { "type": "string" },
+        "priority": { "type": "number" },
+        "success_count": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["bot_username"]
+    },
+    "SearchJob": {
+      "title": "SearchJob",
+      "description": "On-demand search jobs dispatched across external bots",
+      "type": "object",
+      "properties": {
+        "query": { "type": "string" },
+        "user_telegram_id": { "type": "string" },
+        "status": { "type": "string" },
+        "bot_used": { "type": "string" },
+        "file_name": { "type": "string" },
+        "telegram_file_id": { "type": "string" },
+        "file_size": { "type": "number" },
+        "quality": { "type": "string" },
+        "created_at": { "type": "string" },
+        "fulfilled_at": { "type": "string" }
+      },
+      "required": ["query", "user_telegram_id"]
     }
   },
   "firestore": {
@@ -81,6 +130,18 @@
     "/watch_history/{id}": {
       "schema": "UserWatchHistory",
       "description": "User streaming history"
+    },
+    "/crawler_targets/{id}": {
+      "schema": "CrawlerTarget",
+      "description": "Target Telegram channels for userbot crawler"
+    },
+    "/search_bots/{id}": {
+      "schema": "SearchBot",
+      "description": "External search bots configured for automated queries"
+    },
+    "/search_jobs/{id}": {
+      "schema": "SearchJob",
+      "description": "On-demand search jobs queue"
     }
   }
 }

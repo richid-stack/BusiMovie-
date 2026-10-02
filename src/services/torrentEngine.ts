@@ -12,41 +12,62 @@ export interface TorrentSearchResult {
   url: string;
 }
 
+const YTS_MIRRORS = [
+  "https://yts.lt",
+  "https://yts.ag",
+  "https://yts.am",
+  "https://yts.mx"
+];
+
 /**
- * Searches YTS (public open API) for movie torrents.
- * YTS is completely open, zero-auth, making it perfect for this POC.
+ * Searches open trackers for movie torrents using resilient multi-mirror fallback.
+ * Handled gracefully and silently if trackers are unreachable or return 500.
  */
 export async function searchOpenTracker(query: string): Promise<TorrentSearchResult[]> {
-  try {
-    const res = await axios.get("https://yts.ag/api/v2/list_movies.json", {
-      params: { query_term: query, limit: 3 }
-    });
+  if (!query || !query.trim()) return [];
+  const cleanQuery = query.trim();
 
-    if (!res.data || !res.data.data || !res.data.data.movies) {
-      return [];
-    }
+  for (const mirror of YTS_MIRRORS) {
+    try {
+      const res = await axios.get(`${mirror}/api/v2/list_movies.json`, {
+        params: { query_term: cleanQuery, limit: 4 },
+        timeout: 3000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/json"
+        }
+      });
 
-    const results: TorrentSearchResult[] = [];
-    for (const movie of res.data.data.movies) {
-      if (movie.torrents) {
-        for (const torrent of movie.torrents) {
-          results.push({
-            title: movie.title,
-            year: movie.year,
-            quality: torrent.quality,
-            size: torrent.size,
-            hash: torrent.hash,
-            url: torrent.url
-          });
+      if (!res.data || !res.data.data || !res.data.data.movies) {
+        continue;
+      }
+
+      const results: TorrentSearchResult[] = [];
+      for (const movie of res.data.data.movies) {
+        if (movie.torrents && Array.isArray(movie.torrents)) {
+          for (const torrent of movie.torrents) {
+            results.push({
+              title: movie.title,
+              year: movie.year,
+              quality: torrent.quality,
+              size: torrent.size,
+              hash: torrent.hash,
+              url: torrent.url
+            });
+          }
         }
       }
-    }
 
-    return results;
-  } catch (error) {
-    console.error("YTS Search Error:", error);
-    return [];
+      if (results.length > 0) {
+        return results;
+      }
+    } catch (err: any) {
+      // Graceful fallback to next mirror if mirror returns 500 or network error
+      console.warn(`[TorrentEngine] YTS mirror ${mirror} unreachable (${err?.response?.status || err?.message}), trying next mirror...`);
+    }
   }
+
+  return [];
 }
 
 /**

@@ -10,7 +10,8 @@ import {
   MediaFileRecord,
   getAllUsers,
   getRandomMediaFile,
-  getAllVaultTitles
+  getAllVaultTitles,
+  searchVaultFilesDirect
 } from "../db/index.js";
 import { getAIMovieRecommendations, analyzeUserIntent, generateMoviePostWatchFollowUp } from "../services/gemini.js";
 import { addMovieToRadarr } from "../services/arr.js";
@@ -42,17 +43,62 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
-// Helper to parse filename / caption into movie title, year, quality, season, and episode
-function parseMediaDetails(filenameOrCaption: string): {
+// Helper to parse filename and caption into movie title, year, quality, season, and episode
+// Helper to parse filename and caption into movie title, year, quality, season, and episode
+export function parseMediaDetails(rawFilename?: string, rawCaption?: string): {
   title: string;
   year?: string;
   quality: string;
   season?: number;
   episode?: number;
 } {
+  const isPromo = (text?: string): boolean => {
+    if (!text || !text.trim()) return true;
+    const lower = text.toLowerCase().trim();
+    return (
+      lower.startsWith("join ") ||
+      lower.startsWith("subscribe") ||
+      lower.startsWith("backup channel") ||
+      lower.includes("join @") ||
+      lower.includes("join our") ||
+      lower.includes("t.me/") ||
+      lower.includes("@f5") ||
+      lower.includes("@apple_movies") ||
+      lower.includes("@apple movies") ||
+      lower.includes("@apple") ||
+      /^(@[a-zA-Z0-9_]+\s*)+$/.test(lower) ||
+      /^join\s+@/i.test(lower)
+    );
+  };
+
+  // Determine primary text source: ALWAYS prefer filename if caption is promo or lacks movie/year info
+  let sourceText = "";
+  const caption = (rawCaption || "").trim();
+  const filename = (rawFilename || "").trim();
+
+  if (filename && !isPromo(filename)) {
+    if (caption && !isPromo(caption) && (/movie\s*:/i.test(caption) || /title\s*:/i.test(caption))) {
+      sourceText = caption;
+    } else {
+      sourceText = filename;
+    }
+  } else if (caption && !isPromo(caption)) {
+    sourceText = caption;
+  } else if (filename) {
+    sourceText = filename;
+  } else {
+    sourceText = caption || "Untitled Movie";
+  }
+
+  // If sourceText has "Movie:" or "Title:", extract that portion
+  const moviePrefixMatch = sourceText.match(/(?:movie|title)\s*:\s*([^\n\r]+)/i);
+  if (moviePrefixMatch) {
+    sourceText = moviePrefixMatch[1].trim();
+  }
+
   // If multi-line, try to find the most relevant line (has year, quality, or season)
-  const lines = filenameOrCaption.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  let relevantLine = lines[0] || "";
+  const lines = sourceText.split('\n').map(l => l.trim()).filter(l => l.length > 0 && !isPromo(l));
+  let relevantLine = lines[0] || sourceText;
   for (const line of lines) {
     if (
       /\b(19\d{2}|20\d{2})\b/.test(line) || 
@@ -65,46 +111,74 @@ function parseMediaDetails(filenameOrCaption: string): {
   }
 
   // Strip emojis and common junk symbols
-  let clean = relevantLine.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{2300}-\u{23FF}📌🎬🍿✅⚡]/gu, '').trim();
+  let clean = relevantLine.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{2300}-\u{23FF}📌🎬🍿✅⚡⭐]/gu, '').trim();
   clean = clean.replace(/\.[a-zA-Z0-9]{2,4}$/, ""); // remove extension
 
-  // Extract Season & Episode (e.g. S01E02, S1E2, Season 1 Episode 2)
+  // Strip promo channel phrases
+  clean = clean.replace(/join\s+@[\w_]+/gi, "").trim();
+  clean = clean.replace(/@[\w_]+/g, "").trim();
+  clean = clean.replace(/^\[[A-Za-z0-9 _-]+\]\s*/, "");
+  clean = clean.replace(/^(fc|psa|hevc|webrip|bluray|x265|x264)[_.-]+/i, "");
+
+  // Special check for S.W.A.T. / SWAT
+  if (/^s\.w\.a\.t/i.test(clean) || /^swat/i.test(clean) || /^s w a t/i.test(clean)) {
+    const seMatch = clean.match(/s(\d{1,2})e(\d{1,3})/i) || clean.match(/season\s*(\d{1,2})\s*episode\s*(\d{1,3})/i);
+    const qMatch = clean.match(/\b(2160p|4K|1080p|720p|480p|HD)\b/i);
+    return {
+      title: "S.W.A.T.",
+      year: "2017",
+      quality: qMatch ? qMatch[1].toUpperCase() : "720P",
+      season: seMatch ? parseInt(seMatch[1], 10) : undefined,
+      episode: seMatch ? parseInt(seMatch[2], 10) : undefined
+    };
+  }
+
+  // Convert underscores and dots to spaces to allow regex word boundaries \b to work properly
+  const spaced = clean.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Extract Season & Episode
   let season: number | undefined;
   let episode: number | undefined;
-  const seMatch = clean.match(/s(\d{1,2})e(\d{1,3})/i) || clean.match(/season\s*(\d{1,2})\s*episode\s*(\d{1,3})/i);
+  const seMatch = spaced.match(/\b(?:s(\d{1,2})\s*e(\d{1,3})|season\s*(\d{1,2})\s*episode\s*(\d{1,3}))\b/i);
   if (seMatch) {
-    season = parseInt(seMatch[1], 10);
-    episode = parseInt(seMatch[2], 10);
+    season = parseInt(seMatch[1] || seMatch[3], 10);
+    episode = parseInt(seMatch[2] || seMatch[4], 10);
   }
 
   // Extract quality
   let quality = "1080p";
-  const qualityMatch = clean.match(/\b(2160p|4K|1080p|720p|480p|HD|HDR|UHD)\b/i);
+  const qualityMatch = spaced.match(/\b(2160p|4K|1080p|720p|480p|HD|HDR|UHD)\b/i);
   if (qualityMatch) {
     quality = qualityMatch[1].toUpperCase();
   }
 
   // Extract year
   let year = "";
-  const yearMatch = clean.match(/\b(19\d{2}|20\d{2})\b/);
+  const yearMatch = spaced.match(/\b(19\d{2}|20\d{2})\b/);
   if (yearMatch) {
     year = yearMatch[1];
   }
 
   // Clean title: take portion before season/episode, year, or quality
-  let cutIndex = clean.length;
-  if (seMatch && seMatch.index !== undefined) {
+  let cutIndex = spaced.length;
+  if (seMatch && seMatch.index !== undefined && seMatch.index > 0) {
     cutIndex = Math.min(cutIndex, seMatch.index);
   }
-  if (yearMatch && yearMatch.index !== undefined) {
+  if (yearMatch && yearMatch.index !== undefined && yearMatch.index > 0) {
     cutIndex = Math.min(cutIndex, yearMatch.index);
   }
-  if (qualityMatch && qualityMatch.index !== undefined) {
+  if (qualityMatch && qualityMatch.index !== undefined && qualityMatch.index > 0) {
     cutIndex = Math.min(cutIndex, qualityMatch.index);
   }
 
-  let title = clean.substring(0, cutIndex).replace(/[._\-–—[\]()]+/g, " ").trim();
-  if (!title) title = clean.replace(/[._\-–—[\]()]+/g, " ").trim();
+  let title = spaced.substring(0, cutIndex).replace(/\b(WEBRip|BluRay|BRRip|x264|x265|HEVC|AAC|HDR|HD|HQ|RMSTRD|NF|AMZN|PSA)\b/gi, "").trim();
+  if (!title || title.toLowerCase() === "join" || title.length < 2) {
+    // If title was mangled by promo text, fallback strictly to rawFilename
+    if (filename && filename !== sourceText) {
+      return parseMediaDetails(filename, "");
+    }
+    title = spaced || "Untitled Movie";
+  }
 
   return { title, year, quality, season, episode };
 }
@@ -232,11 +306,23 @@ async function handleMediaUpload(
   replyCtx?: any
 ) {
   const filename = mediaObj.file_name || caption || "movie.mp4";
-  const parsed = parseMediaDetails(caption || filename);
+  const parsed = parseMediaDetails(mediaObj.file_name, caption);
 
   const channelId = chat.type === "channel" || chat.type === "supergroup" || chat.type === "group"
     ? chat.id.toString()
     : "";
+
+  // Prevent duplicate index entries for same message in channel
+  if (channelId && messageId) {
+    const existing = await db.execute({
+      sql: "SELECT id FROM media_files WHERE telegram_channel_id = ? AND telegram_message_id = ? LIMIT 1",
+      args: [channelId, messageId.toString()]
+    });
+    if (existing.rows.length > 0) {
+      console.log(`[Media Vault] Message ${messageId} in ${channelId} already indexed (ID: ${existing.rows[0].id}). Skipping.`);
+      return Number(existing.rows[0].id);
+    }
+  }
 
   let posterUrl = "";
   try {
@@ -404,6 +490,16 @@ async function deliverMediaFile(ctx: any, fileId: number) {
         parse_mode: "HTML"
       });
     }
+  }
+
+  if (!sentMessage) {
+    await ctx.reply(
+      `⚠️ <b>Unable to deliver "${escapeHtml(file.movie_title as string)}" right now.</b>\n\n` +
+      `The file could not be transferred from the Telegram channel (it may be processing or restricted).\n\n` +
+      `💡 <i>Tip: Forward the video into your Telegram vault channel or search again to trigger an on-demand re-fetch!</i>`,
+      { parse_mode: "HTML" }
+    );
+    return;
   }
 
   // Send an interactive countdown & companion notification card
@@ -1651,6 +1747,20 @@ export function initializeBot(): Telegraf | null {
 
     if (query.startsWith("/")) return; // Ignore other slash commands
 
+    await executeMovieSearch(ctx, query);
+  });
+
+  // Dedicated /search and /find commands
+  bot.command(["search", "find"], async (ctx) => {
+    const rawText = ctx.message.text || "";
+    const query = rawText.replace(/^\/(search|find)(?:@\w+)?\s*/i, "").trim();
+    if (!query) {
+      return ctx.reply("🔍 <b>Please enter a movie or series title to search.</b>\n\nExamples:\n• <code>/search Passenger 2026</code>\n• <code>/search SWAT</code>\n• <code>/search Inception</code>", { parse_mode: "HTML" });
+    }
+    await executeMovieSearch(ctx, query);
+  });
+
+  async function executeMovieSearch(ctx: any, query: string) {
     // Log search
     try {
       await db.execute({
@@ -1661,11 +1771,124 @@ export function initializeBot(): Telegraf | null {
       console.error("Failed to log search:", e);
     }
 
-    const waitMsg = await ctx.reply("🤔 Analyzing your request...");
+    const waitMsg = await ctx.reply("🔍 Searching your Vault and catalog...");
 
-    // Phase 6: BusiMovie Core AI Intent Router
-    const intentResult = await analyzeUserIntent(query, "User is interacting via Telegram bot. Vault has media.");
+    // 1. Check Vault FIRST! If user uploaded this movie, give them instant access!
+    const directVaultFiles = await searchVaultFilesDirect(query);
     
+    if (directVaultFiles.length > 0) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+
+      // Group files by cleaned movie_title
+      const groups = new Map<string, typeof directVaultFiles>();
+      for (const f of directVaultFiles) {
+        const key = f.movie_title.trim();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(f);
+      }
+
+      let renderedCount = 0;
+      for (const [title, files] of groups.entries()) {
+        if (renderedCount >= 3) break;
+        renderedCount++;
+
+        const first = files[0];
+        const year = first.year ? `(${first.year})` : "";
+        const isSeries = files.some(f => f.season !== null && f.season !== undefined);
+
+        let caption = `🍿 <b>[VAULT READY]</b>\n🎬 <b>${escapeHtml(title)}</b> ${escapeHtml(year)}\n\n`;
+        if (isSeries) {
+          caption += `📺 <b>Episodes in Vault:</b> ${files.length}\n`;
+        } else {
+          caption += `💿 <b>Available Qualities:</b> ${files.map(f => f.quality || "HD").join(", ")}\n`;
+        }
+        caption += `⚡ <i>Available right now for instant streaming & download!</i>\n\n`;
+
+        const buttons: any[] = [];
+
+        if (isSeries) {
+          // Sort episodes chronologically
+          files.sort((a, b) => ((a.season || 0) * 1000 + (a.episode || 0)) - ((b.season || 0) * 1000 + (b.episode || 0)));
+          // Group into rows of 2 buttons for clean Telegram layout
+          let currentRow: any[] = [];
+          for (const file of files) {
+            const epLabel = (file.season && file.episode) ? `S${file.season}E${file.episode}` : `Ep ${file.id}`;
+            currentRow.push(Markup.button.callback(`▶️ ${epLabel} (${file.quality || "HD"})`, `watch_${file.id}`));
+            if (currentRow.length === 2) {
+              buttons.push(currentRow);
+              currentRow = [];
+            }
+          }
+          if (currentRow.length > 0) {
+            buttons.push(currentRow);
+          }
+        } else {
+          for (const file of files) {
+            buttons.push([
+              Markup.button.callback(
+                `▶️ Watch (${file.quality || "HD"}) • ${formatFileSize(file.file_size || 0)}`,
+                `watch_${file.id}`
+              )
+            ]);
+          }
+        }
+
+        // Subtitles & trailer buttons
+        const searchStr = encodeURIComponent(title);
+        buttons.push([
+          Markup.button.url("💬 Subtitles", `https://subdl.com/subtitle/search?q=${searchStr}`),
+          Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
+        ]);
+
+        let trailerUrl = files.find(f => f.trailer_url)?.trailer_url;
+        if (!trailerUrl) {
+          try {
+            const trailer = await getOfficialTrailer(title, first.year);
+            trailerUrl = trailer?.url;
+          } catch {}
+        }
+        if (trailerUrl) {
+          buttons.push([Markup.button.url("🎬 Watch Official Trailer", trailerUrl)]);
+        }
+
+        caption += `⚠️ <i>This card will self-destruct in 2 minutes.</i>`;
+        const keyboard = Markup.inlineKeyboard(buttons);
+
+        let poster = first.poster_url;
+        if (!poster) {
+          try {
+            const meta = await searchMovies(title);
+            if (meta && meta[0]?.poster_path) {
+              poster = meta[0].poster_path;
+              first.poster_url = poster;
+              db.execute({ sql: "UPDATE media_files SET poster_url = ? WHERE id = ?", args: [poster, first.id] }).catch(() => {});
+            }
+          } catch {}
+        }
+
+        let sentMsg: any;
+        if (poster) {
+          const imageUrl = poster.startsWith("http") ? poster : `https://image.tmdb.org/t/p/w500${poster}`;
+          try {
+            sentMsg = await ctx.replyWithPhoto(imageUrl, { caption, parse_mode: "HTML", ...keyboard });
+          } catch {
+            sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
+          }
+        } else {
+          sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
+        }
+
+        if (sentMsg?.message_id) {
+          setTimeout(() => {
+            ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => {});
+          }, 120000);
+        }
+      }
+      return;
+    }
+
+    // 2. If not found directly in Vault, route via AI intent & external metadata catalog
+    const intentResult = await analyzeUserIntent(query, "User is interacting via Telegram bot. Vault has media.");
     console.log(`[BusiMovie Intent]: ${intentResult.intent} (Conf: ${intentResult.confidence}) -> Target: ${intentResult.mediaTitle}`);
 
     if (intentResult.intent === "search_library" || intentResult.intent === "request_media" || (intentResult.intent === "general_chat" && intentResult.mediaTitle)) {
@@ -1677,7 +1900,9 @@ export function initializeBot(): Telegraf | null {
         
         if (results.length === 0) {
           const noMatchMsg = await ctx.reply(
-            `I understood you are looking for "${targetQuery}", but I couldn't find any exact matches. Try rephrasing?\n\n⚠️ <i>This message will self-destruct in 2 minutes.</i>`,
+            `I understood you are looking for "${targetQuery}", but I couldn't find any exact matches in Vault or catalogs.\n\n` +
+            `• Check spelling or try a shorter title\n` +
+            `• Or send /request to queue automated crawler fulfillment!`,
             { parse_mode: "HTML" }
           );
           setTimeout(() => {
@@ -1736,7 +1961,6 @@ export function initializeBot(): Telegraf | null {
             // Phase 6 POC: Open Tracker / Torrent Fetch
             const torrents = await searchOpenTracker(movie.title);
             if (torrents.length > 0) {
-              // Pick the best/first one for the POC
               const t = torrents[0];
               buttons.push([
                 Markup.button.callback(`⬇️ Direct Download POC (${t.quality})`, `dl_${t.hash}`)
@@ -1782,7 +2006,6 @@ export function initializeBot(): Telegraf | null {
             sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
           }
 
-          // Strict 2-minute self-destruct timer for search cards
           if (sentMsg?.message_id) {
             setTimeout(() => {
               ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => {});
@@ -1879,7 +2102,7 @@ export function initializeBot(): Telegraf | null {
         }, 120000);
       }
     }
-  });
+  }
 
   // Interactive movie rating callback
   bot.action(/^rate_(\d+)$/, async (ctx) => {

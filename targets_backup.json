@@ -1,0 +1,46 @@
+[
+  {
+    "id": 55,
+    "channel_identifier": "-1004305303447",
+    "title": "Most Wanted",
+    "status": "active",
+    "min_file_size_mb": 200,
+    "quality_filter": "all",
+    "last_crawled_at": null,
+    "total_files_found": 23,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 56,
+    "channel_identifier": "@Cinema4K_Vault",
+    "title": "Cinema 4K & 1080p Releases",
+    "status": "paused",
+    "min_file_size_mb": 500,
+    "quality_filter": "1080p",
+    "last_crawled_at": null,
+    "total_files_found": 0,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 57,
+    "channel_identifier": "@DirectMovieStreams",
+    "title": "Direct Master Movie Hub",
+    "status": "paused",
+    "min_file_size_mb": 700,
+    "quality_filter": "all",
+    "last_crawled_at": null,
+    "total_files_found": 0,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 58,
+    "channel_identifier": "@UltraHD_CinemaLibrary",
+    "title": "Ultra HD Cinema Library",
+    "status": "paused",
+    "min_file_size_mb": 1000,
+    "quality_filter": "4k",
+    "last_crawled_at": null,
+    "total_files_found": 0,
+    "created_at": "2026-10-02 11:42:00"
+  }
+]

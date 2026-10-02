@@ -1,0 +1,57 @@
+[
+  {
+    "id": 61,
+    "bot_username": "@Apple_moviebot",
+    "bot_type": "command",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 1,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 62,
+    "bot_username": "@cinemagic_hd_bot",
+    "bot_type": "command",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 1,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 63,
+    "bot_username": "@TGMovieSearchBot",
+    "bot_type": "inline",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 1,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 64,
+    "bot_username": "@FilesSearchMasterBot",
+    "bot_type": "command",
+    "command_template": "/find {query}",
+    "status": "active",
+    "priority": 2,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 11:42:00"
+  },
+  {
+    "id": 65,
+    "bot_username": "@iPapkornSearchBot",
+    "bot_type": "inline",
+    "command_template": "{query}",
+    "status": "active",
+    "priority": 3,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 11:42:00"
+  }
+]

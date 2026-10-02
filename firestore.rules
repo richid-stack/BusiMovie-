@@ -18,6 +18,22 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    match /crawler_targets/{id} {
+      allow read, write: if true;
+    }
+
+    match /search_bots/{id} {
+      allow read, write: if true;
+    }
+
+    match /search_jobs/{id} {
+      allow read, write: if true;
+    }
+
+    match /app_settings/{id} {
+      allow read, write: if true;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

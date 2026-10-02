@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Play, Search, Bell, Plus, DownloadCloud, UploadCloud, FolderPlus, Info, Check, X } from "lucide-react";
+import { Play, Search, Bell, Plus, DownloadCloud, UploadCloud, FolderPlus, Info, Check, X, Bot, Zap, RefreshCw } from "lucide-react";
 import { MediaFile, SearchResult } from "../types";
 
 export default function UserStorefront() {
@@ -13,6 +13,10 @@ export default function UserStorefront() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [selectedMovie, setSelectedMovie] = useState<MediaFile | null>(null);
+
+  // Auto-Fetch & User Request State
+  const [requestSubmitting, setRequestSubmitting] = useState(false);
+  const [requestNotice, setRequestNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 50);
@@ -65,12 +69,51 @@ export default function UserStorefront() {
     } catch (err) { setStreamInfo({ loading: false }); }
   };
 
+  const handleRequestAndFetch = async () => {
+    if (!searchQuery.trim()) return;
+    setRequestSubmitting(true);
+    setRequestNotice(null);
+    try {
+      const res = await fetch("/api/requests/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: searchQuery.trim(),
+          auto_fetch: true
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setRequestNotice(data.message || `Dispatched bot search for "${searchQuery}"!`);
+        await fetchData();
+      } else {
+        setRequestNotice(data.error || "Could not dispatch request");
+      }
+    } catch (e: any) {
+      setRequestNotice("Error: " + e.message);
+    } finally {
+      setRequestSubmitting(false);
+    }
+  };
+
   const getGradient = (title: string) => {
     const colors = ["from-red-900 to-black", "from-zinc-800 to-black", "from-blue-950 to-black", "from-purple-950 to-black"];
     return colors[title.length % colors.length];
   };
 
-  const filteredLibrary = library.filter(m => m.movie_title.toLowerCase().includes(searchQuery.toLowerCase()));
+  const filteredLibrary = library.filter(m => {
+    if (!searchQuery.trim()) return true;
+    const cleanQ = searchQuery.toLowerCase().trim();
+    const qNorm = cleanQ.replace(/[^a-z0-9]/g, '');
+    const title = (m.movie_title || '').toLowerCase();
+    const fileName = (m.file_name || '').toLowerCase();
+    const tNorm = title.replace(/[^a-z0-9]/g, '');
+    const fnNorm = fileName.replace(/[^a-z0-9]/g, '');
+    
+    return title.includes(cleanQ) || 
+           fileName.includes(cleanQ) || 
+           (qNorm.length >= 2 && (tNorm.includes(qNorm) || fnNorm.includes(qNorm)));
+  });
 
   return (
     <div className="min-h-screen bg-[#141414] text-white font-sans overflow-x-hidden pb-12 selection:bg-red-600/30">
@@ -297,6 +340,33 @@ export default function UserStorefront() {
                   </div>
                 </div>
               ))}
+            </div>
+          ) : searchQuery ? (
+            <div className="p-8 bg-zinc-900/60 border border-zinc-800 rounded-2xl max-w-xl my-6 space-y-4 animate-in fade-in">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-red-600/10 text-red-500 rounded-xl">
+                  <Bot className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">"{searchQuery}" is not in the Vault yet</h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">Our autonomous MTProto userbot can search external Telegram networks and fetch it directly.</p>
+                </div>
+              </div>
+
+              {requestNotice && (
+                <div className="p-3 bg-zinc-950 border border-purple-500/30 text-purple-300 text-xs rounded-lg animate-in fade-in">
+                  {requestNotice}
+                </div>
+              )}
+
+              <button
+                onClick={handleRequestAndFetch}
+                disabled={requestSubmitting}
+                className="w-full sm:w-auto px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-red-600/20 disabled:opacity-50"
+              >
+                {requestSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                {requestSubmitting ? "Querying External Bots..." : "Auto-Fetch Title via Bot Crawler"}
+              </button>
             </div>
           ) : (
             <div className="text-zinc-500 text-sm py-10">Your vault is currently empty. Head to Telegram to request a movie!</div>

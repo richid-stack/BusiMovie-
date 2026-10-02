@@ -59,3 +59,77 @@ export interface Status {
   };
   recentUpdates: TelegramUpdateLog[];
 }
+
+export interface CrawlerTarget {
+  id: number;
+  channel_identifier: string;
+  title: string;
+  status: "active" | "paused" | "syncing";
+  min_file_size_mb: number;
+  quality_filter: string;
+  last_crawled_at: string | null;
+  total_files_found: number;
+  created_at: string;
+}
+
+export interface SearchBot {
+  id: number;
+  bot_username: string;
+  bot_type: "inline" | "command";
+  command_template: string;
+  status: "active" | "degraded" | "inactive";
+  priority: number;
+  success_count: number;
+  last_queried_at: string | null;
+  created_at: string;
+}
+
+export interface SearchJob {
+  id: number;
+  query: string;
+  user_telegram_id: string;
+  status: "pending" | "searching" | "fulfilled" | "failed";
+  bot_used?: string;
+  file_name?: string;
+  telegram_file_id?: string;
+  file_size?: number;
+  quality?: string;
+  error?: string;
+  created_at: string;
+  fulfilled_at?: string;
+}
+
+export interface CrawlerActivityLog {
+  id: string;
+  timestamp: string;
+  type: "channel_crawl" | "bot_search" | "vault_forward" | "flood_wait";
+  source: string;
+  title: string;
+  details: string;
+  status: "success" | "filtered" | "cooldown" | "error";
+}
+
+export interface CrawlerStatus {
+  workerActive: boolean;
+  floodWaitActive: boolean;
+  floodWaitCooldownSeconds: number;
+  targetsCount: number;
+  activeTargets: number;
+  searchBotsCount: number;
+  activeBots: number;
+  pendingJobsCount: number;
+  fulfilledJobsCount: number;
+  sessionConfigured: boolean;
+  auxiliarySession?: {
+    apiIdConfigured: boolean;
+    apiHashConfigured: boolean;
+    sessionConfigured: boolean;
+    connected: boolean;
+    username: string;
+    firstName: string;
+    phone: string;
+    hasPendingCode: boolean;
+    pendingPhone: string | null;
+    vaultChannelId: string;
+  };
+}

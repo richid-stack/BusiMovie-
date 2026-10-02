@@ -154,3 +154,151 @@ export async function deleteMediaFileFromFirestore(id: string | number): Promise
     return false;
   }
 }
+
+// Save app setting to Firestore (key-value)
+export async function saveAppSettingToFirestore(key: string, value: string): Promise<boolean> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return false;
+    await setDoc(doc(db, "app_settings", key), {
+      key,
+      value,
+      updated_at: new Date().toISOString()
+    }, { merge: true });
+    return true;
+  } catch (err) {
+    console.error(`[Firebase] Error saving setting "${key}" to Firestore:`, err);
+    return false;
+  }
+}
+
+// Get single setting from Firestore
+export async function getAppSettingFromFirestore(key: string): Promise<string | null> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return null;
+    const snap = await getDoc(doc(db, "app_settings", key));
+    if (snap.exists() && snap.data()?.value) {
+      return String(snap.data().value);
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[Firebase] Error reading setting "${key}" from Firestore:`, err);
+    return null;
+  }
+}
+
+// Get all settings from Firestore
+export async function getAllAppSettingsFromFirestore(): Promise<Record<string, string>> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return {};
+    const snap = await getDocs(collection(db, "app_settings"));
+    const settings: Record<string, string> = {};
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data?.value !== undefined) {
+        settings[d.id] = String(data.value);
+      }
+    });
+    return settings;
+  } catch (err) {
+    console.warn("[Firebase] Error reading all settings from Firestore:", err);
+    return {};
+  }
+}
+
+// Delete setting from Firestore
+export async function deleteAppSettingFromFirestore(key: string): Promise<boolean> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return false;
+    await deleteDoc(doc(db, "app_settings", key));
+    return true;
+  } catch (err) {
+    console.error(`[Firebase] Error deleting setting "${key}" from Firestore:`, err);
+    return false;
+  }
+}
+
+// Save search bots to Firestore
+export async function saveSearchBotsToFirestore(bots: any[]): Promise<boolean> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return false;
+    for (const b of bots) {
+      const docId = b.bot_username || String(b.id);
+      await setDoc(doc(db, "search_bots", docId), {
+        bot_username: b.bot_username,
+        bot_type: b.bot_type || "command",
+        command_template: b.command_template || "/search {query}",
+        status: b.status || "active",
+        priority: Number(b.priority || 1),
+        success_count: Number(b.success_count || 0),
+        updated_at: new Date().toISOString()
+      }, { merge: true });
+    }
+    return true;
+  } catch (err) {
+    console.error("[Firebase] Error saving search bots to Firestore:", err);
+    return false;
+  }
+}
+
+// Get all search bots from Firestore
+export async function getAllSearchBotsFromFirestore(): Promise<any[]> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return [];
+    const snap = await getDocs(collection(db, "search_bots"));
+    const bots: any[] = [];
+    snap.forEach((d) => {
+      bots.push({ ...d.data(), id: d.id });
+    });
+    return bots;
+  } catch (err) {
+    console.warn("[Firebase] Error reading search bots from Firestore:", err);
+    return [];
+  }
+}
+
+// Save crawler targets to Firestore
+export async function saveCrawlerTargetsToFirestore(targets: any[]): Promise<boolean> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return false;
+    for (const t of targets) {
+      const docId = t.channel_identifier || String(t.id);
+      await setDoc(doc(db, "crawler_targets", docId), {
+        channel_identifier: t.channel_identifier,
+        title: t.title || t.channel_identifier,
+        status: t.status || "active",
+        min_file_size_mb: Number(t.min_file_size_mb || 300),
+        quality_filter: t.quality_filter || "all",
+        total_files_found: Number(t.total_files_found || 0),
+        updated_at: new Date().toISOString()
+      }, { merge: true });
+    }
+    return true;
+  } catch (err) {
+    console.error("[Firebase] Error saving crawler targets to Firestore:", err);
+    return false;
+  }
+}
+
+// Get all crawler targets from Firestore
+export async function getAllCrawlerTargetsFromFirestore(): Promise<any[]> {
+  try {
+    const db = getFirebaseDb();
+    if (!db) return [];
+    const snap = await getDocs(collection(db, "crawler_targets"));
+    const targets: any[] = [];
+    snap.forEach((d) => {
+      targets.push({ ...d.data(), id: d.id });
+    });
+    return targets;
+  } catch (err) {
+    console.warn("[Firebase] Error reading crawler targets from Firestore:", err);
+    return [];
+  }
+}

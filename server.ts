@@ -36,6 +36,30 @@ import {
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
 import { searchMovies } from "./src/services/movieProvider.js";
 import { getOfficialTrailer } from "./src/services/trailerService.js";
+import {
+  initCrawlerService,
+  getCrawlerStatus,
+  getCrawlerTargets,
+  addCrawlerTarget,
+  updateCrawlerTarget,
+  deleteCrawlerTarget,
+  runChannelBackfill,
+  getSearchBots,
+  addSearchBot,
+  deleteSearchBot,
+  testQuerySearchBot,
+  getCrawlerLogs,
+  getSearchJobs,
+  dispatchAutomatedSearch,
+  requestAuxiliaryLoginCode,
+  verifyAuxiliaryLoginCode,
+  disconnectAuxiliarySession,
+  getAuxiliarySessionStatus,
+  saveDirectSessionString,
+  setEffectiveVaultChannelId,
+  fetchAndForwardBotMedia,
+  getJoinedDialogs
+} from "./src/services/crawlerService.js";
 
 async function startServer() {
   const app = express();
@@ -53,9 +77,10 @@ async function startServer() {
   // Database initialization state
   let dbReady = false;
   setupDatabase()
-    .then(() => {
+    .then(async () => {
       dbReady = true;
       console.log("Database initialized.");
+      await initCrawlerService();
     })
     .catch((err) => {
       console.error("Database setup error:", err);
@@ -533,6 +558,327 @@ async function startServer() {
       }
 
       res.json({ success: true, message: "Request marked fulfilled and user notified." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Create request from Storefront/WebApp with optional auto-fetch
+  app.post("/api/requests/create", async (req, res) => {
+    try {
+      const { title, telegram_id, auto_fetch } = req.body;
+      if (!title || !title.trim()) {
+        return res.status(400).json({ error: "Movie title is required" });
+      }
+      const cleanTitle = title.trim();
+      const userId = telegram_id || "web_user";
+
+      // Check if already in vault
+      const existing = (await db.execute({
+        sql: "SELECT id, movie_title FROM media_files WHERE LOWER(movie_title) = LOWER(?) LIMIT 1",
+        args: [cleanTitle]
+      })).rows;
+
+      if (existing.length > 0) {
+        return res.json({ 
+          alreadyInVault: true, 
+          media: existing[0],
+          message: `"${cleanTitle}" is already in the Vault!` 
+        });
+      }
+
+      // Check if request already pending
+      const pendingCheck = (await db.execute({
+        sql: "SELECT id FROM requests WHERE LOWER(title) = LOWER(?) AND status = 'pending' LIMIT 1",
+        args: [cleanTitle]
+      })).rows;
+
+      let reqId = pendingCheck[0]?.id;
+      if (!reqId) {
+        const ins = await db.execute({
+          sql: "INSERT INTO requests (telegram_id, tmdb_id, title, status) VALUES (?, ?, ?, 'pending')",
+          args: [userId, `req_${Date.now()}`, cleanTitle]
+        });
+        reqId = Number(ins.lastInsertRowid);
+      }
+
+      // If auto-fetch requested, dispatch search immediately
+      let fetchResult: any = null;
+      if (auto_fetch !== false) {
+        fetchResult = await dispatchAutomatedSearch(cleanTitle, userId, bot);
+      }
+
+      res.json({
+        success: true,
+        requestId: reqId,
+        title: cleanTitle,
+        autoFetch: fetchResult,
+        message: fetchResult?.success 
+          ? `Auto-fetched "${cleanTitle}" and added to Vault!` 
+          : `Request submitted for "${cleanTitle}". Automated bots queued to search.`
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 1-Click Auto-Fetch specific request using External Search Bots
+  app.post("/api/requests/:id/auto-fetch", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const reqRecord = (await db.execute({
+        sql: "SELECT * FROM requests WHERE id = ?",
+        args: [id]
+      })).rows[0] as any;
+
+      if (!reqRecord) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      const result = await dispatchAutomatedSearch(reqRecord.title, reqRecord.telegram_id, bot);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ================= CRAWLER & SEARCH BOT AUTOMATION ROUTES =================
+  app.get("/api/crawler/status", async (req, res) => {
+    try {
+      const status = await getCrawlerStatus();
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Request Telegram login code sent directly to user's auxiliary phone
+  app.post("/api/crawler/session/request-code", async (req, res) => {
+    try {
+      const { phone } = req.body;
+      if (!phone) {
+        return res.status(400).json({ error: "Phone number with country code is required (e.g. +1234567890)" });
+      }
+      const result = await requestAuxiliaryLoginCode(phone);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Verify the 5-digit code sent by Telegram & save session
+  app.post("/api/crawler/session/verify-code", async (req, res) => {
+    try {
+      const { code, password } = req.body;
+      if (!code) {
+        return res.status(400).json({ error: "Verification code is required" });
+      }
+      const result = await verifyAuxiliaryLoginCode(code, password);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Disconnect auxiliary userbot
+  app.post("/api/crawler/session/disconnect", async (req, res) => {
+    try {
+      await disconnectAuxiliarySession();
+      res.json({ success: true, message: "Auxiliary session disconnected." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Save raw StringSession if pasted directly
+  app.post("/api/crawler/session/save-session", async (req, res) => {
+    try {
+      const { session } = req.body;
+      if (!session) {
+        return res.status(400).json({ error: "Session string is required" });
+      }
+      await saveDirectSessionString(session);
+      res.json({ success: true, message: "Session string saved successfully!" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Update Vault Channel ID
+  app.post("/api/crawler/vault-channel", async (req, res) => {
+    try {
+      const { channel_id } = req.body;
+      if (!channel_id) {
+        return res.status(400).json({ error: "Channel ID is required (e.g. -1001234567890)" });
+      }
+      await setEffectiveVaultChannelId(channel_id);
+      res.json({ success: true, message: "Vault Channel ID saved!" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/targets", async (req, res) => {
+    try {
+      const targetsList = await getCrawlerTargets();
+      res.json(targetsList);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/targets", async (req, res) => {
+    try {
+      const { channel_identifier, title, min_file_size_mb, quality_filter } = req.body;
+      if (!channel_identifier) {
+        return res.status(400).json({ error: "channel_identifier is required (e.g. @MoviesChannel or link)" });
+      }
+      const created = await addCrawlerTarget({
+        channel_identifier,
+        title: title || channel_identifier,
+        min_file_size_mb: min_file_size_mb ? parseInt(min_file_size_mb, 10) : 500,
+        quality_filter: quality_filter || "all"
+      });
+      res.json({ success: true, target: created });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put("/api/crawler/targets/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const success = await updateCrawlerTarget(id, req.body);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/crawler/targets/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const success = await deleteCrawlerTarget(id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/targets/:id/backfill", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const limit = parseInt(req.body.limit || "50", 10);
+      const result = await runChannelBackfill(id, limit);
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/bots", async (req, res) => {
+    try {
+      const bots = await getSearchBots();
+      res.json(bots);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/bots", async (req, res) => {
+    try {
+      const { bot_username, bot_type, command_template, priority } = req.body;
+      if (!bot_username) {
+        return res.status(400).json({ error: "bot_username is required" });
+      }
+      const created = await addSearchBot({
+        bot_username,
+        bot_type: bot_type || "inline",
+        command_template: command_template || "/search {query}",
+        priority: priority ? parseInt(priority, 10) : 1
+      });
+      res.json({ success: true, bot: created });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/crawler/bots/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const success = await deleteSearchBot(id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/bots/test-query", async (req, res) => {
+    try {
+      const { bot_username, query } = req.body;
+      if (!bot_username || !query) {
+        return res.status(400).json({ error: "bot_username and query are required" });
+      }
+      const result = await testQuerySearchBot(bot_username, query);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/bots/forward", async (req, res) => {
+    try {
+      const { bot_username, message_id, button_row, button_col } = req.body;
+      if (!bot_username || !message_id) {
+        return res.status(400).json({ error: "bot_username and message_id are required" });
+      }
+      const result = await fetchAndForwardBotMedia({
+        botUsername: bot_username,
+        messageId: Number(message_id),
+        buttonRow: button_row !== undefined ? Number(button_row) : undefined,
+        buttonCol: button_col !== undefined ? Number(button_col) : undefined
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/joined-dialogs", async (req, res) => {
+    try {
+      const dialogs = await getJoinedDialogs();
+      res.json(dialogs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/logs", (req, res) => {
+    try {
+      const logs = getCrawlerLogs();
+      res.json(logs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/jobs", async (req, res) => {
+    try {
+      const jobs = await getSearchJobs();
+      res.json(jobs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/dispatch-search", async (req, res) => {
+    try {
+      const { query, telegram_id } = req.body;
+      if (!query) {
+        return res.status(400).json({ error: "query is required" });
+      }
+      const result = await dispatchAutomatedSearch(query, telegram_id, bot);
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

@@ -234,58 +234,47 @@ async function searchTMDB(query: string, apiKey: string): Promise<UnifiedMovie[]
  * Automatically uses:
  * 1. TMDB (if TMDB_API_KEY provided)
  * 2. OMDb (if OMDB_API_KEY provided)
- * 3. Default: Keyless IMDb + TVmaze + Wikipedia Engine (zero keys required!)
+ * 3. Keyless primary: IMDb Public Suggestion API (instant, rich posters, cast, synopsis)
+ * 4. Keyless secondary: TVmaze API (specialized in television series & shows)
  */
 export async function searchMovies(query: string): Promise<UnifiedMovie[]> {
-  // If user configured TMDB API Key
+  if (!query || !query.trim()) return [];
+  const cleanQuery = query.trim();
+
+  // 1. If user configured TMDB API Key
   if (process.env.TMDB_API_KEY) {
-    const tmdbResults = await searchTMDB(query, process.env.TMDB_API_KEY);
+    const tmdbResults = await searchTMDB(cleanQuery, process.env.TMDB_API_KEY);
     if (tmdbResults.length > 0) {
       return tmdbResults;
     }
   }
 
-  // If user configured OMDb API Key
+  // 2. If user configured OMDb API Key
   if (process.env.OMDB_API_KEY) {
-    const omdbResults = await searchOMDb(query, process.env.OMDB_API_KEY);
+    const omdbResults = await searchOMDb(cleanQuery, process.env.OMDB_API_KEY);
     if (omdbResults.length > 0) {
       return omdbResults;
     }
   }
 
-  // Keyless primary: YTS Open Tracker (great for movies)
+  // 3. Keyless primary: IMDb Public Suggestion API
   try {
-    const ytsRes = await axios.get("https://yts.ag/api/v2/list_movies.json", {
-      params: { query_term: query, limit: 3 },
-      timeout: 4000
-    });
-    if (ytsRes.data?.data?.movies && ytsRes.data.data.movies.length > 0) {
-      const ytsResults = ytsRes.data.data.movies.map((m: any) => ({
-        id: `yts_${m.id}`,
-        title: m.title,
-        year: m.year?.toString() || "",
-        overview: m.summary || "No synopsis available.",
-        poster_path: m.large_cover_image || m.medium_cover_image || null,
-        vote_average: m.rating ? `${m.rating}/10` : "N/A",
-        media_type: "Movie",
-        source: "tmdb" // spoofed to allow downstream logic
-      }));
-      return ytsResults;
+    const imdbResults = await searchIMDb(cleanQuery);
+    if (imdbResults.length > 0) {
+      return imdbResults;
     }
   } catch (err: any) {
-    console.warn("YTS Search error in provider:", err.message);
+    // Graceful fallback to secondary
   }
 
-  // Keyless secondary: IMDb Public Suggestion API
-  const imdbResults = await searchIMDb(query);
-  if (imdbResults.length > 0) {
-    return imdbResults;
-  }
-
-  // Keyless secondary: TVmaze API (especially great for series/shows)
-  const tvmazeResults = await searchTVmaze(query);
-  if (tvmazeResults.length > 0) {
-    return tvmazeResults;
+  // 4. Keyless secondary: TVmaze API (especially great for series/shows)
+  try {
+    const tvmazeResults = await searchTVmaze(cleanQuery);
+    if (tvmazeResults.length > 0) {
+      return tvmazeResults;
+    }
+  } catch (err: any) {
+    // Graceful fallback
   }
 
   return [];
