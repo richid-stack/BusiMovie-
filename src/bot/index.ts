@@ -11,14 +11,70 @@ import {
   getAllUsers,
   getRandomMediaFile,
   getAllVaultTitles,
-  searchVaultFilesDirect
+  searchVaultFilesDirect,
+  getVaultSeriesCatalog,
+  getSeriesSeasons,
+  getSeriesSeasonEpisodes,
+  getVaultMovieCatalog,
+  getMovieQualities,
+  getMediaFileById,
+  markRequestsFulfilled
 } from "../db/index.js";
 import { getAIMovieRecommendations, analyzeUserIntent, generateMoviePostWatchFollowUp } from "../services/gemini.js";
-import { addMovieToRadarr } from "../services/arr.js";
 import { searchOpenTracker, downloadTorrent } from "../services/torrentEngine.js";
+import {
+  testQuerySearchBot,
+  fetchAndForwardBotMedia,
+  dispatchAutomatedSearch,
+  getSearchBots
+} from "../services/crawlerService.js";
 
-// In-memory cache for movie titles to support clean requests
+// In-memory caches for Telegram inline button limits (max 64 bytes)
 const titleCache = new Map<string, string>();
+const showKeyCache = new Map<string, string>();
+const showTitleToKey = new Map<string, string>();
+let showKeyCounter = 1;
+
+function getShowKey(title: string): string {
+  const clean = title.trim();
+  if (showTitleToKey.has(clean)) return showTitleToKey.get(clean)!;
+  const key = `s${showKeyCounter++}`;
+  showKeyCache.set(key, clean);
+  showTitleToKey.set(clean, key);
+  return key;
+}
+
+const movieKeyCache = new Map<string, { title: string; year?: string }>();
+const movieTitleToKey = new Map<string, string>();
+let movieKeyCounter = 1;
+
+function getMovieKey(title: string, year?: string): string {
+  const cleanTitle = title.trim();
+  const cleanYr = year ? year.trim() : "";
+  const fullKey = `${cleanTitle}__${cleanYr}`;
+  if (movieTitleToKey.has(fullKey)) return movieTitleToKey.get(fullKey)!;
+  const key = `m${movieKeyCounter++}`;
+  movieKeyCache.set(key, { title: cleanTitle, year: cleanYr });
+  movieTitleToKey.set(fullKey, key);
+  return key;
+}
+
+const queryKeyCache = new Map<string, string>();
+let queryKeyCounter = 1;
+function getQueryKey(q: string): string {
+  const clean = q.trim();
+  const key = `q${queryKeyCounter++}`;
+  queryKeyCache.set(key, clean);
+  return key;
+}
+
+const botRespCache = new Map<string, { botUsername: string; messageId: number; buttons: any[]; query: string }>();
+let botRespCounter = 1;
+function saveBotResponse(data: { botUsername: string; messageId: number; buttons: any[]; query: string }): string {
+  const key = `b${botRespCounter++}`;
+  botRespCache.set(key, data);
+  return key;
+}
 
 export interface TelegramUpdateLog {
   id: string;
@@ -1391,56 +1447,509 @@ export function initializeBot(): Telegraf | null {
     }
   });
 
-  // Handle movie requests from inline buttons
-  bot.action(/^request_(.+)$/, async (ctx) => {
-    await ensureUser(ctx);
-    const movieId = ctx.match[1];
-    
+  // Helper for autonomous crawler request and quality selection
+  async function triggerAutonomousCrawlerFlow(ctx: any, targetTitle: string, tmdbId?: string) {
     if (!ctx.from) return;
+    const userId = ctx.from.id.toString();
+    const cleanTitle = targetTitle.trim();
 
-    // Check 3 limit per day
+    // Check daily limit (5 requests per day)
     const resCount = await db.execute({
       sql: "SELECT COUNT(*) as count FROM requests WHERE telegram_id = ? AND date(created_at) = date('now')",
-      args: [ctx.from.id.toString()]
+      args: [userId]
     });
-    const count = Number(resCount.rows[0].count || 0);
-    if (count >= 3) {
-      await ctx.answerCbQuery("❌ Daily Limit Reached (3 requests). Try again tomorrow!", { show_alert: true });
+    const count = Number(resCount.rows[0]?.count || 0);
+    if (count >= 5) {
+      await ctx.answerCbQuery("❌ Daily Limit Reached (5 requests). Try again tomorrow!", { show_alert: true });
       return;
     }
 
-    const movieTitle = titleCache.get(movieId) || `Movie ${movieId}`;
+    // Insert request record
+    const insRes = await db.execute({
+      sql: "INSERT INTO requests (telegram_id, tmdb_id, title, status) VALUES (?, ?, ?, 'searching')",
+      args: [userId, tmdbId || "", cleanTitle]
+    });
+    const reqId = Number(insRes.lastInsertRowid || 0);
+
+    await ctx.answerCbQuery("🔎 Querying external search bots...");
+    const statusMsg = await ctx.reply(
+      `🤖 <b>Triggering Autonomous Crawler...</b>\n\nSearching external bots for: <b>${escapeHtml(cleanTitle)}</b>\nPlease wait a few seconds...`,
+      { parse_mode: "HTML" }
+    );
 
     try {
-      await db.execute({
-        sql: "INSERT INTO requests (telegram_id, tmdb_id, title) VALUES (?, ?, ?)",
-        args: [ctx.from.id.toString(), movieId, movieTitle]
+      const bots = await getSearchBots();
+      const activeBot = bots.find(b => b.status === 'active')?.bot_username || "@Apple_moviebot";
+
+      const searchRes = await testQuerySearchBot(activeBot, cleanTitle);
+
+      if (!searchRes.found) {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          undefined,
+          `📝 <b>Request Logged!</b>\n\n🎬 <b>${escapeHtml(cleanTitle)}</b> has been queued for our autonomous crawler.\n\n⚠️ <i>${escapeHtml(searchRes.error || "The title is being searched across all peer networks.")}</i>\nYou will receive an instant notification here as soon as it is ingested to the Vault!`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // If search bot returned download/quality options (e.g. 1080p, 720p, 480p, 4K)
+      const downloadBtns = (searchRes.buttons || []).filter(b => b.isDownload || b.text.match(/\b(1080p|720p|480p|4K|2160p|GB|MB|Download|Get)\b/i));
+
+      if (downloadBtns.length > 0 && searchRes.messageId) {
+        const respKey = saveBotResponse({
+          botUsername: activeBot,
+          messageId: searchRes.messageId,
+          buttons: searchRes.buttons || [],
+          query: cleanTitle
+        });
+
+        const keyboardRows: any[] = [];
+        for (const btn of downloadBtns.slice(0, 6)) {
+          keyboardRows.push([
+            Markup.button.callback(`🎬 ${btn.text}`, `botfwd_${respKey}_${btn.row}_${btn.col}_${reqId}`)
+          ]);
+        }
+        keyboardRows.push([Markup.button.callback("❌ Cancel", "noop")]);
+
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          undefined,
+          `🤖 <b>Available Releases Found!</b>\n\n🎬 <b>${escapeHtml(cleanTitle)}</b>\n📡 <i>Source: ${escapeHtml(activeBot)}</i>\n\nChoose your preferred quality/file below to auto-forward directly to the Vault:`,
+          {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard(keyboardRows)
+          }
+        );
+        return;
+      }
+
+      // If direct media or single release
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        undefined,
+        `⚡ <b>Media Found!</b> Auto-forwarding <b>${escapeHtml(cleanTitle)}</b> to your Vault channel...`,
+        { parse_mode: "HTML" }
+      );
+
+      const fwdRes = await fetchAndForwardBotMedia({
+        botUsername: activeBot,
+        messageId: searchRes.messageId || 0
       });
 
-      // Phase 6: Automatic Radarr push
-      let radarrMessage = "";
-      if (movieId.startsWith("tmdb_")) {
-        const cleanTmdbId = movieId.replace("tmdb_", "");
-        const arrResult = await addMovieToRadarr(cleanTmdbId);
-        if (arrResult.success) {
-          radarrMessage = " (Sent to Radarr for automated download!)";
-        } else {
-          console.log("[Radarr/Sonarr] Skipped or failed:", arrResult.message);
+      await markRequestsFulfilled([reqId]);
+
+      const watchBtn = fwdRes.mediaFileId
+        ? [Markup.button.callback("▶️ Watch Now", `watch_${fwdRes.mediaFileId}`)]
+        : [Markup.button.callback("📚 View Library", "browse_library")];
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        undefined,
+        `🎉 <b>Autonomous Ingestion Complete!</b>\n\n🎬 <b>${escapeHtml(fwdRes.fileName || cleanTitle)}</b> has arrived in your Vault and is ready for instant streaming and download!`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([watchBtn])
+        }
+      );
+    } catch (err: any) {
+      console.error("Autonomous request error:", err);
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        undefined,
+        `📝 <b>Request Saved!</b>\n\n🎬 <b>${escapeHtml(cleanTitle)}</b> has been added to your request queue. You will receive an instant notification when it's uploaded to the Vault!`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+    }
+  }
+
+  // Handle movie requests from inline buttons (TMDb / catalog IDs)
+  bot.action(/^request_(.+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const movieId = ctx.match[1];
+    const movieTitle = titleCache.get(movieId) || `Movie ${movieId}`;
+    await triggerAutonomousCrawlerFlow(ctx, movieTitle, movieId);
+  });
+
+  // Handle manual title requests ("Can't find it? Request a title")
+  bot.action(/^req_q_(.+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const qKey = ctx.match[1];
+    const query = queryKeyCache.get(qKey) || qKey;
+    await triggerAutonomousCrawlerFlow(ctx, query);
+  });
+
+  // Handle quality button choice from search bot results
+  bot.action(/^botfwd_([^_]+)_(\d+)_(\d+)_(\d+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const respKey = ctx.match[1];
+    const row = parseInt(ctx.match[2], 10);
+    const col = parseInt(ctx.match[3], 10);
+    const reqId = parseInt(ctx.match[4], 10);
+
+    const cached = botRespCache.get(respKey);
+    if (!cached) {
+      return ctx.answerCbQuery("⚠️ Session expired. Please search again.");
+    }
+
+    await ctx.answerCbQuery("⚡ Forwarding selected release to Vault...");
+    await ctx.editMessageText(
+      `⚡ <b>Fetching Selected Quality...</b>\n\nDownloading & forwarding to your Telegram Vault channel via crawler userbot...\nPlease wait a few moments!`,
+      { parse_mode: "HTML" }
+    );
+
+    try {
+      const fwdRes = await fetchAndForwardBotMedia({
+        botUsername: cached.botUsername,
+        messageId: cached.messageId,
+        buttonRow: row,
+        buttonCol: col
+      });
+
+      await markRequestsFulfilled([reqId]);
+
+      const watchBtn = fwdRes.mediaFileId
+        ? [Markup.button.callback("▶️ Watch Now", `watch_${fwdRes.mediaFileId}`)]
+        : [Markup.button.callback("📚 View Library", "browse_library")];
+
+      await ctx.editMessageText(
+        `🎉 <b>Autonomous Ingestion Complete!</b>\n\n🎬 <b>${escapeHtml(fwdRes.fileName || cached.query)}</b> (${fwdRes.fileSizeBytes ? formatFileSize(fwdRes.fileSizeBytes) : "HD"})\n\n✅ Saved directly to your Telegram Vault!\nTap below to stream or download:`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            watchBtn,
+            [Markup.button.callback("🍿 Browse All Titles", "browse_library")]
+          ])
+        }
+      );
+    } catch (err: any) {
+      console.error("Error in botfwd callback:", err);
+      await ctx.editMessageText(
+        `⚠️ <b>Forwarding Encountered an Issue:</b> ${escapeHtml(err.message || "Unknown error")}\n\nYour request for <b>${escapeHtml(cached.query)}</b> remains saved in the queue!`,
+        { parse_mode: "HTML" }
+      );
+    }
+  });
+
+  // Level 2: Series Season Selector (Screenshot 2)
+  bot.action(/^ser_(.+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const showKey = ctx.match[1];
+    const seriesTitle = showKeyCache.get(showKey) || showKey;
+
+    const seasons = await getSeriesSeasons(seriesTitle);
+
+    if (seasons.length === 0) {
+      await ctx.answerCbQuery();
+      const qKey = getQueryKey(seriesTitle);
+      const text = `You selected the series <b>${escapeHtml(seriesTitle)}</b>.\n\n⚠️ <i>No seasons are currently in your Vault.</i>\n\nWould you like our autonomous crawler to fetch it from external bots?`;
+      const kb = Markup.inlineKeyboard([
+        [Markup.button.callback("📥 Request Series via Auto-Crawler", `req_q_${qKey}`)],
+        [Markup.button.callback("◀️ Back to Search Results", "back_search")]
+      ]);
+
+      try {
+        await ctx.editMessageText(text, { parse_mode: "HTML", ...kb });
+      } catch {
+        await ctx.reply(text, { parse_mode: "HTML", ...kb });
+      }
+      return;
+    }
+
+    await ctx.answerCbQuery();
+
+    // Build 2-column season button grid (Screenshot 2)
+    const seasonButtons: any[] = [];
+    let currentRow: any[] = [];
+
+    for (const s of seasons) {
+      currentRow.push(Markup.button.callback(`🗓️ Season ${s}`, `eps_${showKey}_${s}_1`));
+      if (currentRow.length === 2) {
+        seasonButtons.push(currentRow);
+        currentRow = [];
+      }
+    }
+    if (currentRow.length > 0) {
+      seasonButtons.push(currentRow);
+    }
+
+    seasonButtons.push([Markup.button.callback("◀️ Back to Search Results", "back_search")]);
+
+    const text = `You selected the series <b>${escapeHtml(seriesTitle)}</b>.\nPlease choose a season:`;
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(seasonButtons) });
+    } catch {
+      await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(seasonButtons) });
+    }
+  });
+
+  // Level 3: Episode Browser with Pagination (Screenshot 3)
+  bot.action(/^eps_([^_]+)_(\d+)_(\d+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const showKey = ctx.match[1];
+    const seasonNum = parseInt(ctx.match[2], 10);
+    const page = parseInt(ctx.match[3], 10) || 1;
+
+    const seriesTitle = showKeyCache.get(showKey) || showKey;
+    const allEpisodes = await getSeriesSeasonEpisodes(seriesTitle, seasonNum);
+
+    if (allEpisodes.length === 0) {
+      await ctx.answerCbQuery("No episodes found in Vault for this season.");
+      return;
+    }
+
+    await ctx.answerCbQuery();
+
+    const pageSize = 8;
+    const totalPages = Math.ceil(allEpisodes.length / pageSize) || 1;
+    const currentPage = Math.max(1, Math.min(page, totalPages));
+    const pageEpisodes = allEpisodes.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+    const episodeButtons: any[] = [];
+
+    for (let i = 0; i < pageEpisodes.length; i++) {
+      const ep = pageEpisodes[i];
+      const epNum = ep.episode || (currentPage - 1) * pageSize + i + 1;
+      let epName = `Episode ${epNum}`;
+      if (ep.file_name) {
+        const cleanFn = ep.file_name.replace(/\.[a-zA-Z0-9]+$/, "").replace(/[._]+/g, " ");
+        const matchName = cleanFn.match(/s\d+e\d+[\s._-]+(.+)/i);
+        if (matchName && matchName[1] && matchName[1].trim().length > 2) {
+          const rawName = matchName[1].replace(/\b(720p|1080p|480p|x265|x264|hevc|bluray|webrip)\b/gi, "").trim();
+          if (rawName.length > 2) {
+            epName = `${epNum}. ${rawName}`;
+          }
         }
       }
 
-      ctx.answerCbQuery("✅ Request received! We'll notify you when it's added to the Vault.");
-      ctx.editMessageReplyMarkup(Markup.inlineKeyboard([
-        Markup.button.callback(`✅ Requested${radarrMessage ? " ⚙️" : ""}`, "noop")
-      ]).reply_markup);
-      
-      if (radarrMessage) {
-        await ctx.reply(`⚙️ <b>Automation Triggered:</b> ${escapeHtml(movieTitle)} was successfully sent to the download automation queue! You will be notified when it arrives in the Vault.`, { parse_mode: "HTML" });
-      }
-    } catch (error) {
-      console.error("Error recording request:", error);
-      ctx.answerCbQuery("❌ Error processing request.");
+      const qText = ep.quality || "HD";
+      const sizeText = formatFileSize(Number(ep.file_size || 0));
+      episodeButtons.push([
+        Markup.button.callback(`📼 ${epName} (${qText}) • ${sizeText}`, `watch_${ep.id}`)
+      ]);
     }
+
+    // Pagination row (Screenshot 3)
+    const navRow: any[] = [];
+    if (currentPage > 1) {
+      navRow.push(Markup.button.callback("⏪ Prev", `eps_${showKey}_${seasonNum}_${currentPage - 1}`));
+    }
+    navRow.push(Markup.button.callback(`EPs ${currentPage}/${totalPages}`, "noop"));
+    if (currentPage < totalPages) {
+      navRow.push(Markup.button.callback("Next ⏩", `eps_${showKey}_${seasonNum}_${currentPage + 1}`));
+    }
+
+    if (totalPages > 1) {
+      episodeButtons.push(navRow);
+    }
+
+    episodeButtons.push([
+      Markup.button.callback("◀️ Back to Seasons", `ser_${showKey}`)
+    ]);
+
+    const caption = `🎬 <b>${escapeHtml(seriesTitle)} - Season ${seasonNum}</b>\nChoose an episode:`;
+
+    try {
+      await ctx.editMessageText(caption, { parse_mode: "HTML", ...Markup.inlineKeyboard(episodeButtons) });
+    } catch {
+      await ctx.reply(caption, { parse_mode: "HTML", ...Markup.inlineKeyboard(episodeButtons) });
+    }
+  });
+
+  // Fold 2: Movie Quality & Release Selector (When a user clicks a movie from search results)
+  bot.action(/^mov_sel_(.+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const mKey = ctx.match[1];
+    const movieMeta = movieKeyCache.get(mKey);
+    if (!movieMeta) {
+      return ctx.answerCbQuery("Movie details expired. Please search again.");
+    }
+
+    const { title, year } = movieMeta;
+    const qualities = await getMovieQualities(title, year);
+
+    if (qualities.length === 0) {
+      await ctx.answerCbQuery();
+      const qKey = getQueryKey(`${title} ${year || ""}`.trim());
+      const caption = `🎬 <b>${escapeHtml(title)}</b> ${year ? `(${escapeHtml(year)})` : ""}\n\n` +
+        `⚠️ <i>This title is not currently in your Vault.</i>\n\n` +
+        `Would you like our autonomous crawler to search external bots and fetch it for you?`;
+      const kb = Markup.inlineKeyboard([
+        [Markup.button.callback("📥 Request Movie via Auto-Crawler", `req_q_${qKey}`)],
+        [Markup.button.callback("◀️ Back to Search Results", "back_search")]
+      ]);
+
+      try {
+        await ctx.editMessageText(caption, { parse_mode: "HTML", ...kb });
+      } catch {
+        await ctx.reply(caption, { parse_mode: "HTML", ...kb });
+      }
+      return;
+    }
+
+    await ctx.answerCbQuery();
+
+    const yrText = year ? `(${escapeHtml(year)})` : (qualities[0].year ? `(${escapeHtml(qualities[0].year)})` : "");
+    const first = qualities[0];
+
+    const qualityButtons: any[] = [];
+    for (const qFile of qualities) {
+      const qLabel = qFile.quality || "HD";
+      const sizeStr = formatFileSize(Number(qFile.file_size || 0));
+      qualityButtons.push([
+        Markup.button.callback(`💿 Watch ${qLabel} • ${sizeStr}`, `watch_${qFile.id}`)
+      ]);
+    }
+
+    // Subtitles & Trailer buttons
+    const searchStr = encodeURIComponent(title);
+    qualityButtons.push([
+      Markup.button.url("💬 Subtitles", `https://subdl.com/subtitle/search?q=${searchStr}`),
+      Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
+    ]);
+
+    let trailerUrl = qualities.find(f => f.trailer_url)?.trailer_url;
+    if (!trailerUrl) {
+      try {
+        const trailer = await getOfficialTrailer(title, year || qualities[0].year);
+        trailerUrl = trailer?.url;
+      } catch {}
+    }
+    if (trailerUrl) {
+      qualityButtons.push([Markup.button.url("🎬 Watch Official Trailer", trailerUrl)]);
+    }
+
+    qualityButtons.push([Markup.button.callback("◀️ Back to Search Results", "back_search")]);
+
+    const caption = `🎬 <b>${escapeHtml(title)}</b> ${yrText}\n\n` +
+      `🍿 <b>Available Qualities in Vault:</b> ${qualities.length} release${qualities.length > 1 ? "s" : ""}\n\n` +
+      `Please choose your preferred quality/file to stream or download:`;
+
+    let poster = first.poster_url;
+    if (!poster) {
+      try {
+        const meta = await searchMovies(title);
+        if (meta && meta[0]?.poster_path) {
+          poster = meta[0].poster_path;
+        }
+      } catch {}
+    }
+
+    if (poster) {
+      const imgUrl = poster.startsWith("http") ? poster : `https://image.tmdb.org/t/p/w500${poster}`;
+      try {
+        await ctx.replyWithPhoto(imgUrl, {
+          caption,
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard(qualityButtons)
+        });
+        return;
+      } catch {}
+    }
+
+    try {
+      await ctx.editMessageText(caption, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(qualityButtons)
+      });
+    } catch {
+      await ctx.reply(caption, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(qualityButtons)
+      });
+    }
+  });
+
+  // Movie Card Viewer for direct numeric IDs
+  bot.action(/^mov_(\d+)$/, async (ctx) => {
+    await ensureUser(ctx);
+    const fileId = parseInt(ctx.match[1], 10);
+    const file = await getMediaFileById(fileId);
+    if (!file) {
+      return ctx.answerCbQuery("File not found in Vault.");
+    }
+
+    const mKey = getMovieKey(file.movie_title, file.year);
+    // Forward to mov_sel
+    const movieMeta = movieKeyCache.get(mKey);
+    if (movieMeta) {
+      const qualities = await getMovieQualities(file.movie_title, file.year);
+      if (qualities.length > 1) {
+        // Show quality selector
+        const qualityButtons: any[] = [];
+        for (const qFile of qualities) {
+          const qLabel = qFile.quality || "HD";
+          const sizeStr = formatFileSize(Number(qFile.file_size || 0));
+          qualityButtons.push([
+            Markup.button.callback(`💿 Watch ${qLabel} • ${sizeStr}`, `watch_${qFile.id}`)
+          ]);
+        }
+        qualityButtons.push([Markup.button.callback("◀️ Back to Search Results", "back_search")]);
+        return ctx.reply(
+          `🎬 <b>${escapeHtml(file.movie_title)}</b> ${file.year ? `(${escapeHtml(file.year)})` : ""}\n\nPlease choose your preferred quality:`,
+          { parse_mode: "HTML", ...Markup.inlineKeyboard(qualityButtons) }
+        );
+      }
+    }
+
+    await ctx.answerCbQuery();
+    const yearText = file.year ? `(${file.year})` : "";
+    const sizeText = formatFileSize(Number(file.file_size || 0));
+
+    const caption = `🍿 <b>[VAULT READY]</b>\n🎬 <b>${escapeHtml(file.movie_title)}</b> ${escapeHtml(yearText)}\n\n` +
+      `💿 <b>Quality:</b> ${file.quality || "HD"}\n` +
+      `💾 <b>File Size:</b> ${sizeText}\n\n` +
+      `⚡ <i>Available right now for instant streaming & download!</i>\n\n` +
+      `⚠️ <i>This card will self-destruct in 2 minutes.</i>`;
+
+    const searchStr = encodeURIComponent(file.movie_title);
+    const buttons = [
+      [Markup.button.callback(`▶️ Watch & Stream Now (${file.quality || "HD"})`, `watch_${file.id}`)],
+      [
+        Markup.button.url("💬 Subtitles", `https://subdl.com/subtitle/search?q=${searchStr}`),
+        Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
+      ],
+      [Markup.button.callback("◀️ Back to Search Results", "back_search")]
+    ];
+
+    let poster = file.poster_url;
+    if (!poster) {
+      try {
+        const meta = await searchMovies(file.movie_title);
+        if (meta && meta[0]?.poster_path) {
+          poster = meta[0].poster_path;
+        }
+      } catch {}
+    }
+
+    let sentMsg: any;
+    if (poster) {
+      const imageUrl = poster.startsWith("http") ? poster : `https://image.tmdb.org/t/p/w500${poster}`;
+      try {
+        sentMsg = await ctx.replyWithPhoto(imageUrl, { caption, parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      } catch {
+        sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+      }
+    } else {
+      sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...Markup.inlineKeyboard(buttons) });
+    }
+
+    if (sentMsg?.message_id) {
+      setTimeout(() => {
+        ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => {});
+      }, 120000);
+    }
+  });
+
+  // Back to Search Results
+  bot.action("back_search", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply("🔍 <b>Please enter your search query or command:</b>\n\n• Type any title (e.g. <code>Criminal Minds</code>, <code>S.W.A.T.</code>, <code>Passenger</code>)\n• Or tap /browse to view your entire Vault library!", { parse_mode: "HTML" });
   });
 
   // Phase 6 POC: Direct Download Action
@@ -1773,335 +2282,109 @@ export function initializeBot(): Telegraf | null {
 
     const waitMsg = await ctx.reply("🔍 Searching your Vault and catalog...");
 
-    // 1. Check Vault FIRST! If user uploaded this movie, give them instant access!
-    const directVaultFiles = await searchVaultFilesDirect(query);
-    
-    if (directVaultFiles.length > 0) {
-      await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
+    // 1. Get Vault Series matching query
+    const vaultSeries = await getVaultSeriesCatalog(query);
 
-      // Group files by cleaned movie_title
-      const groups = new Map<string, typeof directVaultFiles>();
-      for (const f of directVaultFiles) {
-        const key = f.movie_title.trim();
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(f);
-      }
+    // 2. Get Vault Standalone Movies matching query (grouped by title & year)
+    const vaultMovies = await getVaultMovieCatalog(query);
 
-      let renderedCount = 0;
-      for (const [title, files] of groups.entries()) {
-        if (renderedCount >= 3) break;
-        renderedCount++;
+    // 3. Online metadata search
+    let onlineResults: any[] = [];
+    try {
+      onlineResults = await searchMovies(query);
+    } catch {}
 
-        const first = files[0];
-        const year = first.year ? `(${first.year})` : "";
-        const isSeries = files.some(f => f.season !== null && f.season !== undefined);
+    await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
 
-        let caption = `🍿 <b>[VAULT READY]</b>\n🎬 <b>${escapeHtml(title)}</b> ${escapeHtml(year)}\n\n`;
-        if (isSeries) {
-          caption += `📺 <b>Episodes in Vault:</b> ${files.length}\n`;
-        } else {
-          caption += `💿 <b>Available Qualities:</b> ${files.map(f => f.quality || "HD").join(", ")}\n`;
+    const totalHits = vaultSeries.length + vaultMovies.length + onlineResults.length;
+    if (totalHits === 0) {
+      const qKey = getQueryKey(query);
+      const noMatchMsg = await ctx.reply(
+        `🔍 <b>No Results Found for:</b> "${escapeHtml(query)}"\n\n` +
+        `• Check spelling or try a shorter title.\n` +
+        `• Or tap below to dispatch an automated crawler search to external bots!`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("📥 Request Title via Auto-Crawler", `req_q_${qKey}`)],
+            [Markup.button.callback("🍿 Browse All Titles", "browse_library")]
+          ])
         }
-        caption += `⚡ <i>Available right now for instant streaming & download!</i>\n\n`;
-
-        const buttons: any[] = [];
-
-        if (isSeries) {
-          // Sort episodes chronologically
-          files.sort((a, b) => ((a.season || 0) * 1000 + (a.episode || 0)) - ((b.season || 0) * 1000 + (b.episode || 0)));
-          // Group into rows of 2 buttons for clean Telegram layout
-          let currentRow: any[] = [];
-          for (const file of files) {
-            const epLabel = (file.season && file.episode) ? `S${file.season}E${file.episode}` : `Ep ${file.id}`;
-            currentRow.push(Markup.button.callback(`▶️ ${epLabel} (${file.quality || "HD"})`, `watch_${file.id}`));
-            if (currentRow.length === 2) {
-              buttons.push(currentRow);
-              currentRow = [];
-            }
-          }
-          if (currentRow.length > 0) {
-            buttons.push(currentRow);
-          }
-        } else {
-          for (const file of files) {
-            buttons.push([
-              Markup.button.callback(
-                `▶️ Watch (${file.quality || "HD"}) • ${formatFileSize(file.file_size || 0)}`,
-                `watch_${file.id}`
-              )
-            ]);
-          }
-        }
-
-        // Subtitles & trailer buttons
-        const searchStr = encodeURIComponent(title);
-        buttons.push([
-          Markup.button.url("💬 Subtitles", `https://subdl.com/subtitle/search?q=${searchStr}`),
-          Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
-        ]);
-
-        let trailerUrl = files.find(f => f.trailer_url)?.trailer_url;
-        if (!trailerUrl) {
-          try {
-            const trailer = await getOfficialTrailer(title, first.year);
-            trailerUrl = trailer?.url;
-          } catch {}
-        }
-        if (trailerUrl) {
-          buttons.push([Markup.button.url("🎬 Watch Official Trailer", trailerUrl)]);
-        }
-
-        caption += `⚠️ <i>This card will self-destruct in 2 minutes.</i>`;
-        const keyboard = Markup.inlineKeyboard(buttons);
-
-        let poster = first.poster_url;
-        if (!poster) {
-          try {
-            const meta = await searchMovies(title);
-            if (meta && meta[0]?.poster_path) {
-              poster = meta[0].poster_path;
-              first.poster_url = poster;
-              db.execute({ sql: "UPDATE media_files SET poster_url = ? WHERE id = ?", args: [poster, first.id] }).catch(() => {});
-            }
-          } catch {}
-        }
-
-        let sentMsg: any;
-        if (poster) {
-          const imageUrl = poster.startsWith("http") ? poster : `https://image.tmdb.org/t/p/w500${poster}`;
-          try {
-            sentMsg = await ctx.replyWithPhoto(imageUrl, { caption, parse_mode: "HTML", ...keyboard });
-          } catch {
-            sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
-          }
-        } else {
-          sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
-        }
-
-        if (sentMsg?.message_id) {
-          setTimeout(() => {
-            ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => {});
-          }, 120000);
-        }
-      }
+      );
+      setTimeout(() => {
+        ctx.telegram.deleteMessage(ctx.chat.id, noMatchMsg.message_id).catch(() => {});
+      }, 120000);
       return;
     }
 
-    // 2. If not found directly in Vault, route via AI intent & external metadata catalog
-    const intentResult = await analyzeUserIntent(query, "User is interacting via Telegram bot. Vault has media.");
-    console.log(`[BusiMovie Intent]: ${intentResult.intent} (Conf: ${intentResult.confidence}) -> Target: ${intentResult.mediaTitle}`);
+    // Build Search Results Menu (Fold 1: Franchise / Parts / Title Selection)
+    const resultButtons: any[] = [];
+    const addedNormalized = new Set<string>();
 
-    if (intentResult.intent === "search_library" || intentResult.intent === "request_media" || (intentResult.intent === "general_chat" && intentResult.mediaTitle)) {
-      const targetQuery = intentResult.mediaTitle || query;
-      
-      try {
-        const results = await searchMovies(targetQuery);
-        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
-        
-        if (results.length === 0) {
-          const noMatchMsg = await ctx.reply(
-            `I understood you are looking for "${targetQuery}", but I couldn't find any exact matches in Vault or catalogs.\n\n` +
-            `• Check spelling or try a shorter title\n` +
-            `• Or send /request to queue automated crawler fulfillment!`,
-            { parse_mode: "HTML" }
-          );
-          setTimeout(() => {
-            ctx.telegram.deleteMessage(ctx.chat.id, noMatchMsg.message_id).catch(() => {});
-          }, 120000);
-          return;
-        }
-
-        if (intentResult.aiResponse && intentResult.confidence > 0.6) {
-          const aiMsg = await ctx.reply(intentResult.aiResponse);
-          if (aiMsg?.message_id) {
-            setTimeout(() => {
-              ctx.telegram.deleteMessage(ctx.chat.id, aiMsg.message_id).catch(() => {});
-            }, 120000);
-          }
-        }
-
-        const topResults = results.slice(0, 3);
-        for (const movie of topResults) {
-          titleCache.set(movie.id, movie.title);
-
-          const title = movie.title || "Unknown Title";
-          const year = movie.year ? `(${movie.year})` : "";
-          const type = movie.media_type ? `• ${movie.media_type}` : "";
-          const castLine = movie.cast ? `👥 <b>Cast:</b> ${escapeHtml(movie.cast)}\n\n` : "";
-          
-          let caption = `🎬 <b>${escapeHtml(title)}</b> ${escapeHtml(year)} ${escapeHtml(type)}\n\n`;
-          if (castLine) {
-            caption += castLine;
-          }
-          if (movie.overview) {
-            const shortOverview = movie.overview.length > 250
-              ? movie.overview.substring(0, 245) + "..."
-              : movie.overview;
-            caption += `${escapeHtml(shortOverview)}\n\n`;
-          }
-
-          const libraryFiles = await getMediaFilesForMovie(movie.id, movie.title);
-
-          const buttons: any[] = [];
-          if (libraryFiles.length > 0) {
-            for (const file of libraryFiles) {
-              const epText = (file.season && file.episode) ? `S${file.season}E${file.episode} ` : "";
-              buttons.push([
-                Markup.button.callback(
-                  `▶️ Watch ${epText}(${file.quality || "HD"}) • ${formatFileSize(file.file_size || 0)}`,
-                  `watch_${file.id}`
-                )
-              ]);
-            }
-          } else {
-            buttons.push([
-              Markup.button.callback("📝 Request Movie", `request_${movie.id}`)
-            ]);
-            
-            // Phase 6 POC: Open Tracker / Torrent Fetch
-            const torrents = await searchOpenTracker(movie.title);
-            if (torrents.length > 0) {
-              const t = torrents[0];
-              buttons.push([
-                Markup.button.callback(`⬇️ Direct Download POC (${t.quality})`, `dl_${t.hash}`)
-              ]);
-            }
-          }
-
-          // Subtitle links directly on every search card!
-          const searchStr = encodeURIComponent(title);
-          buttons.push([
-            Markup.button.url("💬 Subtitles (Subdl)", `https://subdl.com/subtitle/search?q=${searchStr}`),
-            Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
-          ]);
-
-          // Auto-Trailer: Attach official trailer button directly on movie card!
-          let trailerUrl = libraryFiles.find(f => f.trailer_url)?.trailer_url;
-          if (!trailerUrl) {
-            try {
-              const trailer = await getOfficialTrailer(title, movie.year);
-              trailerUrl = trailer?.url;
-            } catch {}
-          }
-          if (trailerUrl) {
-            buttons.push([Markup.button.url("🎬 Watch Official Trailer", trailerUrl)]);
-          }
-
-          caption += `⚠️ <i>This card will self-destruct in 2 minutes.</i>`;
-
-          const keyboard = Markup.inlineKeyboard(buttons);
-
-          let sentMsg: any;
-          if (movie.poster_path) {
-            const imageUrl = movie.poster_path.startsWith("http")
-              ? movie.poster_path
-              : `https://image.tmdb.org/t/p/w500${movie.poster_path}`;
-
-            try {
-              sentMsg = await ctx.replyWithPhoto(imageUrl, { caption, parse_mode: "HTML", ...keyboard });
-            } catch (imgError) {
-              sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
-            }
-          } else {
-            sentMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
-          }
-
-          if (sentMsg?.message_id) {
-            setTimeout(() => {
-              ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id).catch(() => {});
-            }, 120000);
-          }
-        }
-      } catch (err) {
-        console.error("Search try-catch error:", err);
-        await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
-        await ctx.reply("Sorry, I encountered an error searching for that.");
-      }
-    } else if (intentResult.intent === "recommend_content") {
-      await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
-      const vaultTitles = await getAllVaultTitles();
-      const recs = await getAIMovieRecommendations(query, vaultTitles);
-      
-      const recMsg = await ctx.reply(recs.recommendation + "\n\n⚠️ <i>This recommendation will self-destruct in 2 minutes.</i>", { parse_mode: "HTML" });
-      setTimeout(() => {
-        ctx.telegram.deleteMessage(ctx.chat.id, recMsg.message_id).catch(() => {});
-      }, 120000);
-      
-      if (recs.suggestedTitles.length > 0) {
-        const results = await searchMovies(recs.suggestedTitles[0]);
-        if (results.length > 0) {
-          const topMatch = results[0];
-          titleCache.set(topMatch.id, topMatch.title);
-          
-          let caption = `🎬 <b>${escapeHtml(topMatch.title)}</b> ${topMatch.year ? `(${escapeHtml(topMatch.year)})` : ""}\n\n`;
-          if (topMatch.overview) {
-            caption += `${escapeHtml(topMatch.overview.substring(0, 250))}...\n\n`;
-          }
-
-          const libraryFiles = await getMediaFilesForMovie(topMatch.id, topMatch.title);
-          const buttons: any[] = [];
-          if (libraryFiles.length > 0) {
-            buttons.push([Markup.button.callback(`▶️ Watch Now`, `watch_${libraryFiles[0].id}`)]);
-          } else {
-            buttons.push([Markup.button.callback("📝 Request Movie", `request_${topMatch.id}`)]);
-          }
-          
-          const searchStr = encodeURIComponent(topMatch.title);
-          buttons.push([
-            Markup.button.url("💬 Subtitles (Subdl)", `https://subdl.com/subtitle/search?q=${searchStr}`),
-            Markup.button.url("🌐 OpenSubtitles", `https://www.opensubtitles.org/en/search/sublanguageid-all/searchonlymovies-on/moviename-${searchStr}`)
-          ]);
-
-          caption += `⚠️ <i>This card will self-destruct in 2 minutes.</i>`;
-
-          const keyboard = Markup.inlineKeyboard(buttons);
-          
-          let topMsg: any;
-          if (topMatch.poster_path) {
-             const imgUrl = topMatch.poster_path.startsWith("http") ? topMatch.poster_path : `https://image.tmdb.org/t/p/w500${topMatch.poster_path}`;
-             topMsg = await ctx.replyWithPhoto(imgUrl, { caption, parse_mode: "HTML", ...keyboard }).catch(() => ctx.reply(caption, { parse_mode: "HTML", ...keyboard }));
-          } else {
-             topMsg = await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
-          }
-
-          if (topMsg?.message_id) {
-            setTimeout(() => {
-              ctx.telegram.deleteMessage(ctx.chat.id, topMsg.message_id).catch(() => {});
-            }, 120000);
-          }
-        }
-      }
-    } else {
-      // check_status or general_chat
-      await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
-      
-      const buttons = [
-        [
-          Markup.button.callback("🍿 AI Recommendations", "ai_recs"),
-          Markup.button.callback("🎲 Surprise Me", "surprise_me")
-        ]
-      ];
-      const keyboard = Markup.inlineKeyboard(buttons);
-
-      let chatMsg: any;
-      const aiText = intentResult.aiResponse || "I'm your Movie Vault AI concierge! Type any movie title to search or ask for a recommendation.";
-      
-      try {
-        chatMsg = await ctx.reply(
-          `${aiText}\n\n⚠️ <i>This message will self-destruct in 2 minutes.</i>`,
-          { parse_mode: "HTML", ...keyboard }
-        );
-      } catch (err) {
-        // Fallback without parse_mode if HTML entities caused parsing issue
-        chatMsg = await ctx.reply(aiText, keyboard).catch(() => {});
-      }
-
-      if (chatMsg?.message_id) {
-        setTimeout(() => {
-          ctx.telegram.deleteMessage(ctx.chat.id, chatMsg.message_id).catch(() => {});
-        }, 120000);
-      }
+    // A. Vault Series First
+    for (const s of vaultSeries.slice(0, 5)) {
+      const showKey = getShowKey(s.title);
+      const yr = s.year ? ` (${s.year})` : "";
+      resultButtons.push([
+        Markup.button.callback(`📺 ${s.title}${yr}`, `ser_${showKey}`)
+      ]);
+      addedNormalized.add(s.title.toLowerCase().replace(/[^a-z0-9]/g, ''));
     }
+
+    // B. Vault Movies (Fold 1: List all matching parts/movies)
+    for (const m of vaultMovies.slice(0, 5)) {
+      const norm = `${m.title.toLowerCase()}_${m.year || ""}`.replace(/[^a-z0-9]/g, '');
+      if (addedNormalized.has(norm)) continue;
+      const yr = m.year ? ` (${m.year})` : "";
+      const mKey = getMovieKey(m.title, m.year);
+      resultButtons.push([
+        Markup.button.callback(`🎬 ${m.title}${yr}`, `mov_sel_${mKey}`)
+      ]);
+      addedNormalized.add(norm);
+    }
+
+    // C. Online Results (TMDb / catalog)
+    for (const item of onlineResults.slice(0, 5)) {
+      const norm = `${(item.title || "").toLowerCase()}_${item.year || ""}`.replace(/[^a-z0-9]/g, '');
+      if (addedNormalized.has(norm)) continue;
+      const isShow = item.media_type === "tv" || (item.title && (item.title.includes("Series") || item.title.includes("Season")));
+      const yr = item.year ? ` (${item.year})` : "";
+      const icon = isShow ? "📺" : "🎬";
+
+      if (isShow) {
+        const showKey = getShowKey(item.title);
+        resultButtons.push([
+          Markup.button.callback(`${icon} ${item.title}${yr}`, `ser_${showKey}`)
+        ]);
+      } else {
+        const mKey = getMovieKey(item.title, item.year);
+        titleCache.set(item.id, item.title);
+        resultButtons.push([
+          Markup.button.callback(`${icon} ${item.title}${yr}`, `mov_sel_${mKey}`)
+        ]);
+      }
+      addedNormalized.add(norm);
+    }
+
+    // D. Bottom "Can't find it? Request a title" button (Screenshot 1)
+    const qKey = getQueryKey(query);
+    resultButtons.push([
+      Markup.button.callback("Can't find it? Request a title ▫️", `req_q_${qKey}`)
+    ]);
+
+    const caption = `🔎 <b>Here are the results for:</b> <code>${escapeHtml(query)}</code>`;
+
+    const sentMenu = await ctx.reply(caption, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(resultButtons)
+    });
+
+    if (sentMenu?.message_id) {
+      setTimeout(() => {
+        ctx.telegram.deleteMessage(ctx.chat.id, sentMenu.message_id).catch(() => {});
+      }, 180000);
+    }
+    return;
   }
 
   // Interactive movie rating callback

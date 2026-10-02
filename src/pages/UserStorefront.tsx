@@ -263,27 +263,87 @@ export default function UserStorefront() {
               </div>
             </div>
             
-            <div className="p-10 text-white flex gap-10">
-               <div className="flex-1 space-y-4">
-                  <div className="flex items-center gap-3 text-sm font-bold">
-                    <span className="text-green-500">98% Match</span>
-                    <span>{selectedMovie.year}</span>
-                    <span className="px-1.5 py-px border border-zinc-500 rounded text-zinc-400">{selectedMovie.quality || "HD"}</span>
-                  </div>
-                  <p className="text-zinc-300 text-sm leading-relaxed">
-                    This item was directly fulfilled from your Telegram Vault requests. Enjoy instant streaming and high-speed offline downloads securely from our internal cloud.
-                  </p>
-               </div>
-               <div className="w-1/3 text-sm space-y-3">
-                 <div>
-                   <span className="text-zinc-500">Telegram File ID:</span> 
-                   <span className="text-zinc-300 font-mono text-xs ml-2 break-all">{selectedMovie.telegram_file_id}</span>
+            <div className="p-6 md:p-10 text-white space-y-6">
+               <div className="flex flex-col md:flex-row gap-6 md:gap-10">
+                 <div className="flex-1 space-y-4">
+                    <div className="flex items-center gap-3 text-sm font-bold">
+                      <span className="text-green-500">98% Match</span>
+                      <span>{selectedMovie.year}</span>
+                      <span className="px-1.5 py-px border border-zinc-500 rounded text-zinc-400">{selectedMovie.quality || "HD"}</span>
+                      {selectedMovie.season && (
+                        <span className="px-2 py-0.5 bg-red-600/30 text-red-400 border border-red-500/30 rounded text-xs font-semibold">
+                          Season {selectedMovie.season} {selectedMovie.episode ? `• Ep ${selectedMovie.episode}` : ''}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-zinc-300 text-sm leading-relaxed">
+                      {selectedMovie.season 
+                        ? `Stream all episodes of ${selectedMovie.movie_title} directly from your Telegram Cloud Vault.`
+                        : "This title is directly accessible from your Telegram Cloud Vault. Enjoy instant streaming and high-speed offline downloads."}
+                    </p>
                  </div>
-                 <div>
-                   <span className="text-zinc-500">Size:</span> 
-                   <span className="text-zinc-300 ml-2">{(selectedMovie.file_size / (1024*1024)).toFixed(2)} MB</span>
+                 <div className="md:w-1/3 text-sm space-y-3 bg-zinc-900/60 p-4 rounded-xl border border-zinc-800">
+                   <div>
+                     <span className="text-zinc-500 text-xs uppercase tracking-wider block">Telegram File ID</span> 
+                     <span className="text-zinc-300 font-mono text-xs break-all">{selectedMovie.telegram_file_id}</span>
+                   </div>
+                   <div>
+                     <span className="text-zinc-500 text-xs uppercase tracking-wider block">Quality & Size</span> 
+                     <span className="text-zinc-300 text-xs">{selectedMovie.quality || "HD"} • {(selectedMovie.file_size / (1024*1024)).toFixed(2)} MB</span>
+                   </div>
                  </div>
                </div>
+
+               {/* TV Series Season & Episodes Grid */}
+               {(() => {
+                 const relatedEps = library.filter(
+                   item => item.movie_title.toLowerCase().trim() === selectedMovie.movie_title.toLowerCase().trim() && item.season !== undefined && item.season !== null
+                 ).sort((a, b) => ((a.season || 0) * 1000 + (a.episode || 0)) - ((b.season || 0) * 1000 + (b.episode || 0)));
+
+                 if (relatedEps.length <= 1) return null;
+
+                 return (
+                   <div className="border-t border-zinc-800 pt-6 space-y-4">
+                     <div className="flex items-center justify-between">
+                       <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                         <Film className="w-5 h-5 text-red-500" />
+                         Episodes in Vault ({relatedEps.length})
+                       </h3>
+                     </div>
+
+                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-60 overflow-y-auto pr-1">
+                       {relatedEps.map((ep) => (
+                         <div 
+                           key={ep.id}
+                           onClick={() => handlePlayMedia(ep)}
+                           className={`p-3 rounded-lg border transition flex items-center justify-between cursor-pointer ${
+                             selectedMovie.id === ep.id 
+                               ? 'bg-red-950/40 border-red-600/50 text-white' 
+                               : 'bg-zinc-900/80 hover:bg-zinc-800 border-zinc-800 text-zinc-300'
+                           }`}
+                         >
+                           <div className="flex items-center gap-3 truncate">
+                             <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center shrink-0">
+                               <Play className="w-3.5 h-3.5 fill-white text-white ml-0.5" />
+                             </div>
+                             <div className="truncate">
+                               <p className="text-xs font-bold text-white truncate">
+                                 Season {ep.season}, Episode {ep.episode || ep.id}
+                               </p>
+                               <p className="text-[10px] text-zinc-400">
+                                 {ep.quality || "HD"} • {(ep.file_size / (1024*1024)).toFixed(0)} MB
+                               </p>
+                             </div>
+                           </div>
+                           <span className="text-[10px] px-2 py-1 rounded bg-zinc-800 font-semibold shrink-0">
+                             Play
+                           </span>
+                         </div>
+                       ))}
+                     </div>
+                   </div>
+                 );
+               })()}
             </div>
           </div>
         </div>

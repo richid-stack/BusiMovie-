@@ -848,6 +848,207 @@ export async function getAllMediaFiles(): Promise<MediaFileRecord[]> {
   }
 }
 
+export async function getMediaFileById(id: number): Promise<MediaFileRecord | null> {
+  try {
+    const res = await db.execute({
+      sql: "SELECT * FROM media_files WHERE id = ? LIMIT 1",
+      args: [id]
+    });
+    return (res.rows[0] as unknown as MediaFileRecord) || null;
+  } catch (err) {
+    console.error("Error getting media file by ID:", err);
+    return null;
+  }
+}
+
+export interface VaultSeriesSummary {
+  title: string;
+  year?: string;
+  poster_url?: string;
+  totalEpisodes: number;
+  seasons: number[];
+}
+
+export async function getVaultSeriesCatalog(query?: string): Promise<VaultSeriesSummary[]> {
+  try {
+    const all = await getAllMediaFiles();
+    const seriesFiles = all.filter(f => {
+      if (f.telegram_channel_id === 'AutoVault' || f.telegram_file_id?.includes('USERBOT') || f.telegram_file_id?.includes('BOT_QUERY')) return false;
+      return f.season !== null && f.season !== undefined;
+    });
+
+    const map = new Map<string, { title: string; year?: string; poster_url?: string; seasons: Set<number>; count: number }>();
+    for (const f of seriesFiles) {
+      const key = (f.movie_title || "Untitled Show").trim();
+      if (!map.has(key)) {
+        map.set(key, {
+          title: key,
+          year: f.year,
+          poster_url: f.poster_url,
+          seasons: new Set(),
+          count: 0
+        });
+      }
+      const item = map.get(key)!;
+      item.count++;
+      if (f.season) item.seasons.add(f.season);
+      if (!item.poster_url && f.poster_url) item.poster_url = f.poster_url;
+      if (!item.year && f.year) item.year = f.year;
+    }
+
+    let summaries: VaultSeriesSummary[] = Array.from(map.values()).map(v => ({
+      title: v.title,
+      year: v.year,
+      poster_url: v.poster_url,
+      totalEpisodes: v.count,
+      seasons: Array.from(v.seasons).sort((a, b) => a - b)
+    }));
+
+    if (query && query.trim()) {
+      const clean = query.trim().toLowerCase();
+      const qNorm = clean.replace(/[^a-z0-9]/g, '');
+      summaries = summaries.filter(s => {
+        const t = s.title.toLowerCase();
+        const tNorm = t.replace(/[^a-z0-9]/g, '');
+        return t.includes(clean) || (qNorm.length >= 2 && tNorm.includes(qNorm));
+      });
+    }
+
+    return summaries.sort((a, b) => a.title.localeCompare(b.title));
+  } catch (err) {
+    console.error("Error getting vault series catalog:", err);
+    return [];
+  }
+}
+
+export async function getSeriesSeasons(seriesTitle: string): Promise<number[]> {
+  try {
+    const cleanTitle = seriesTitle.trim();
+    const res = await db.execute({
+      sql: `SELECT DISTINCT season FROM media_files 
+            WHERE (
+              LOWER(movie_title) = LOWER(?) 
+              OR REPLACE(REPLACE(REPLACE(LOWER(movie_title), '.', ''), ' ', ''), '_', '') = REPLACE(REPLACE(REPLACE(LOWER(?), '.', ''), ' ', ''), '_', '')
+            ) AND season IS NOT NULL ORDER BY season ASC`,
+      args: [cleanTitle, cleanTitle]
+    });
+    return res.rows.map((r: any) => Number(r.season)).filter((s: number) => !isNaN(s) && s > 0);
+  } catch (err) {
+    console.error("Error getting series seasons:", err);
+    return [];
+  }
+}
+
+export async function getSeriesSeasonEpisodes(seriesTitle: string, season: number): Promise<MediaFileRecord[]> {
+  try {
+    const cleanTitle = seriesTitle.trim();
+    const res = await db.execute({
+      sql: `SELECT * FROM media_files 
+            WHERE (
+              LOWER(movie_title) = LOWER(?) 
+              OR REPLACE(REPLACE(REPLACE(LOWER(movie_title), '.', ''), ' ', ''), '_', '') = REPLACE(REPLACE(REPLACE(LOWER(?), '.', ''), ' ', ''), '_', '')
+            ) AND season = ? 
+            ORDER BY episode ASC, id ASC`,
+      args: [cleanTitle, cleanTitle, season]
+    });
+    return res.rows as unknown as MediaFileRecord[];
+  } catch (err) {
+    console.error("Error getting series season episodes:", err);
+    return [];
+  }
+}
+
+export interface VaultMovieSummary {
+  title: string;
+  year?: string;
+  poster_url?: string;
+  trailer_url?: string;
+  files: Array<{
+    id: number;
+    quality: string;
+    file_size: number;
+    file_name?: string;
+  }>;
+}
+
+export async function getVaultMovieCatalog(query?: string): Promise<VaultMovieSummary[]> {
+  try {
+    const all = await getAllMediaFiles();
+    const movieFiles = all.filter(f => {
+      if (f.telegram_channel_id === 'AutoVault' || f.telegram_file_id?.includes('USERBOT') || f.telegram_file_id?.includes('BOT_QUERY')) return false;
+      return f.season === null || f.season === undefined;
+    });
+
+    const map = new Map<string, VaultMovieSummary>();
+    for (const f of movieFiles) {
+      const titleKey = (f.movie_title || "Untitled Movie").trim();
+      const yrKey = f.year ? f.year.trim() : "";
+      const groupKey = `${titleKey.toLowerCase()}__${yrKey}`;
+
+      if (!map.has(groupKey)) {
+        map.set(groupKey, {
+          title: titleKey,
+          year: f.year,
+          poster_url: f.poster_url,
+          trailer_url: f.trailer_url,
+          files: []
+        });
+      }
+      const item = map.get(groupKey)!;
+      if (!item.poster_url && f.poster_url) item.poster_url = f.poster_url;
+      if (!item.trailer_url && f.trailer_url) item.trailer_url = f.trailer_url;
+      item.files.push({
+        id: f.id,
+        quality: f.quality || "HD",
+        file_size: Number(f.file_size || 0),
+        file_name: f.file_name
+      });
+    }
+
+    let summaries = Array.from(map.values());
+
+    if (query && query.trim()) {
+      const clean = query.trim().toLowerCase();
+      const qNorm = clean.replace(/[^a-z0-9]/g, '');
+      summaries = summaries.filter(s => {
+        const t = s.title.toLowerCase();
+        const tNorm = t.replace(/[^a-z0-9]/g, '');
+        return t.includes(clean) || (qNorm.length >= 2 && tNorm.includes(qNorm));
+      });
+    }
+
+    return summaries.sort((a, b) => a.title.localeCompare(b.title));
+  } catch (err) {
+    console.error("Error getting vault movie catalog:", err);
+    return [];
+  }
+}
+
+export async function getMovieQualities(movieTitle: string, year?: string): Promise<MediaFileRecord[]> {
+  try {
+    const cleanTitle = movieTitle.trim();
+    let sql = `SELECT * FROM media_files 
+               WHERE (
+                 LOWER(movie_title) = LOWER(?) 
+                 OR REPLACE(REPLACE(REPLACE(LOWER(movie_title), '.', ''), ' ', ''), '_', '') = REPLACE(REPLACE(REPLACE(LOWER(?), '.', ''), ' ', ''), '_', '')
+               ) AND (season IS NULL OR season = '')`;
+    const args: any[] = [cleanTitle, cleanTitle];
+
+    if (year && year.trim()) {
+      sql += ` AND year = ?`;
+      args.push(year.trim());
+    }
+
+    sql += ` ORDER BY file_size DESC, id DESC`;
+
+    const res = await db.execute({ sql, args });
+    return res.rows as unknown as MediaFileRecord[];
+  } catch (err) {
+    console.error("Error getting movie qualities:", err);
+    return [];
+  }
+}
+
 export async function addMediaFile(file: Omit<MediaFileRecord, "id" | "created_at">): Promise<number> {
   const res = await db.execute({
     sql: `

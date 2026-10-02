@@ -1105,8 +1105,9 @@ export async function fetchAndForwardBotMedia(params: {
       args: [vaultId, newMsgId]
     })).rows : [];
 
+    let newFileId: number | undefined;
     if (existing.length === 0) {
-      const addedId = await addMediaFile({
+      newFileId = await addMediaFile({
         movie_id: `tg_${Date.now()}`,
         movie_title: parsedMovieTitle,
         year,
@@ -1119,7 +1120,9 @@ export async function fetchAndForwardBotMedia(params: {
         language: "English",
         mime_type: (mediaMsgToForward.document as any)?.mimeType || "video/mp4"
       });
-      console.log(`[CrawlerService] Direct indexed forwarded media "${parsedMovieTitle}" as ID ${addedId}`);
+      console.log(`[CrawlerService] Direct indexed forwarded media "${parsedMovieTitle}" as ID ${newFileId}`);
+    } else {
+      newFileId = Number(existing[0].id);
     }
   } catch (idxErr: any) {
     console.warn("Direct index in fetchAndForwardBotMedia error:", idxErr.message);
@@ -1137,7 +1140,8 @@ export async function fetchAndForwardBotMedia(params: {
     success: true,
     message: `Forwarded "${parsedMovieTitle}" (${quality}) to your Telegram Vault channel and indexed for users!`,
     fileName,
-    fileSizeBytes: size
+    fileSizeBytes: size,
+    mediaFileId: newFileId
   };
 }
 
@@ -1240,6 +1244,7 @@ export async function dispatchAutomatedSearch(query: string, userTelegramId?: st
           jobId,
           title: cleanTitle,
           botUsed: botToUse,
+          mediaFileId: fwdRes.mediaFileId,
           message: fwdRes.message
         };
       } catch (fwdErr: any) {
