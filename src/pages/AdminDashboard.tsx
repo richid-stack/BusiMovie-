@@ -1,4 +1,4 @@
-import React, { useEffect, useState, FormEvent } from "react";
+import React, { useEffect, useState, useRef, FormEvent } from "react";
 import { 
   Database, Users, Search, Bell, HardDrive, ShieldCheck, 
   RefreshCw, Webhook, Sparkles, Megaphone, Layers, FileVideo, 
@@ -128,6 +128,59 @@ export default function AdminDashboard() {
   const [cronMaxRetries, setCronMaxRetries] = useState("3");
   const [runningBatchNow, setRunningBatchNow] = useState(false);
   const [cronNotice, setCronNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileSelected = async (file: File) => {
+    if (!file) return;
+    setCsvUploading(true);
+    setCsvSourceName(file.name);
+    setCsvReport(null);
+    setCronNotice(null);
+    setShowCsvModal(true);
+
+    try {
+      const isPdf = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
+      const payload: any = { sourceName: file.name };
+
+      if (isPdf) {
+        // Read as Base64 data URL for server-side PDF extraction
+        const base64Promise = new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const dataUrl = await base64Promise;
+        payload.fileBase64 = dataUrl;
+        setCsvInputText(`[PDF Document: ${file.name} (${Math.round(file.size / 1024)} KB)]\nExtracting text and titles...`);
+      } else {
+        const text = await file.text();
+        setCsvInputText(text);
+        payload.csvContent = text;
+      }
+
+      const res = await fetch("/api/crawler/cron/upload-csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCsvReport(data);
+        setCronNotice({
+          type: "success",
+          text: `Successfully ingested "${file.name}": ${data.totalParsed} movies parsed (${data.queued} queued for cron crawl, ${data.duplicatesSkipped} duplicates filtered). Missing years automatically resolved!`
+        });
+        fetchCronData();
+      } else {
+        setCronNotice({ type: "error", text: data.error || "Failed to parse and queue movie list." });
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: "Error reading file: " + err.message });
+    } finally {
+      setCsvUploading(false);
+    }
+  };
 
   const fetchCronData = async () => {
     try {
@@ -2039,18 +2092,40 @@ export default function AdminDashboard() {
                     </h3>
                   </div>
                   <p className="text-xs sm:text-sm text-zinc-400 mt-1 max-w-2xl">
-                    Import lists of 1,000+ movies via CSV. The crawler automatically normalizes titles, checks your Vault to skip duplicate qualities (or upgrade lower qualities), and crawls external bots in small, paced cron batches.
+                    Import lists of 1,000+ movies via <strong className="text-zinc-200">CSV, PDF, Markdown (.md), or TXT</strong>. Missing release years are automatically resolved. The crawler normalizes titles, checks Vault duplicates, and crawls external bots in safe, paced batches.
                   </p>
                 </div>
+
+                {/* Hidden native file input triggered by upload buttons */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept=".csv,.txt,.md,.markdown,.pdf,.tsv,text/plain,text/csv,application/pdf"
+                  onChange={e => {
+                    if (e.target.files && e.target.files[0]) {
+                      handleFileSelected(e.target.files[0]);
+                    }
+                  }}
+                  className="hidden"
+                />
 
                 {/* Primary Action Buttons - Stack on mobile, inline on desktop */}
                 <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
                   <button
-                    onClick={() => setShowCsvModal(!showCsvModal)}
-                    className="flex-1 sm:flex-none px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={csvUploading}
+                    className="flex-1 sm:flex-none px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
                   >
-                    <UploadCloud className="w-4 h-4" />
-                    {showCsvModal ? "Hide Ingestion" : "+ Ingest CSV Movies"}
+                    {csvUploading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                    {csvUploading ? "Ingesting List..." : "+ Upload File (CSV / PDF / MD)"}
+                  </button>
+
+                  <button
+                    onClick={() => setShowCsvModal(!showCsvModal)}
+                    className="flex-1 sm:flex-none px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 border border-zinc-700"
+                  >
+                    <FileText className="w-4 h-4" />
+                    {showCsvModal ? "Hide Panel" : "Paste / Settings"}
                   </button>
 
                   <button
@@ -2142,53 +2217,56 @@ export default function AdminDashboard() {
               {showCsvModal && (
                 <div className="bg-zinc-950 border border-zinc-800 p-4 sm:p-6 rounded-2xl space-y-5 animate-in fade-in duration-200">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
-                    <h4 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-red-500" />
-                      Ingest Movies CSV or Plain Text List
-                    </h4>
-                    <span className="text-xs text-zinc-400">
-                      Supports formats: <code className="text-zinc-200">Title, Quality, Year</code> or plain movie names per line
-                    </span>
+                    <div>
+                      <h4 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-red-500" />
+                        Ingest Movie List (CSV, PDF, Markdown, TXT)
+                      </h4>
+                      <p className="text-xs text-zinc-400 mt-0.5">
+                        Accepts numbered lists (1. Movie), Markdown tables/bullets, CSV/TSV, or plain titles. Missing release years are automatically looked up!
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="px-2 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-400 rounded">.CSV</span>
+                      <span className="px-2 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-400 rounded">.PDF</span>
+                      <span className="px-2 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-400 rounded">.MD</span>
+                      <span className="px-2 py-0.5 bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-400 rounded">.TXT</span>
+                    </div>
                   </div>
 
-                  <form onSubmit={handleUploadCsv} className="space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div className="sm:col-span-2">
-                        <label className="block text-xs text-zinc-300 font-medium mb-1">CSV File Source Tag</label>
-                        <input
-                          type="text"
-                          value={csvSourceName}
-                          onChange={e => setCsvSourceName(e.target.value)}
-                          placeholder="e.g. movies_1000_batch_1.csv"
-                          className="w-full px-3.5 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white outline-none focus:border-zinc-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-zinc-300 font-medium mb-1">Upload CSV File directly</label>
-                        <input
-                          type="file"
-                          accept=".csv,.txt"
-                          onChange={e => {
-                            const file = e.target.files?.[0];
-                            if (file) {
-                              setCsvSourceName(file.name);
-                              const reader = new FileReader();
-                              reader.onload = ev => {
-                                if (ev.target?.result) {
-                                  setCsvInputText(String(ev.target.result));
-                                }
-                              };
-                              reader.readAsText(file);
-                            }
-                          }}
-                          className="w-full text-xs text-zinc-400 file:mr-2 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-zinc-800 file:text-white hover:file:bg-zinc-700"
-                        />
-                      </div>
+                  {/* Drag and Drop Zone */}
+                  <div
+                    onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+                    onDrop={e => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        handleFileSelected(e.dataTransfer.files[0]);
+                      }
+                    }}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="border-2 border-dashed border-zinc-800 hover:border-red-500/60 bg-zinc-900/50 hover:bg-zinc-900 rounded-2xl p-6 text-center cursor-pointer transition space-y-2"
+                  >
+                    <UploadCloud className="w-8 h-8 text-zinc-400 mx-auto" />
+                    <p className="text-sm font-semibold text-white">Click to browse or drag & drop CSV, PDF, Markdown (.md), or TXT file here</p>
+                    <p className="text-xs text-zinc-500">Automatically parses titles, resolves missing release years, filters duplicates, and queues movies for scheduled crawling.</p>
+                  </div>
+
+                  <form onSubmit={handleUploadCsv} className="space-y-4 pt-2">
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs text-zinc-300 font-medium mb-1">CSV File Source Tag</label>
+                      <input
+                        type="text"
+                        value={csvSourceName}
+                        onChange={e => setCsvSourceName(e.target.value)}
+                        placeholder="e.g. movies_1000_batch_1.csv"
+                        className="w-full px-3.5 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white outline-none focus:border-zinc-500"
+                      />
                     </div>
 
                     <div>
                       <label className="block text-xs text-zinc-300 font-medium mb-1">
-                        Paste CSV Rows or Movie Titles (e.g. Inception 2010, Interstellar, Dune Part 2)
+                        Or Paste CSV Rows / Movie Titles directly
                       </label>
                       <textarea
                         rows={6}
@@ -2201,7 +2279,7 @@ export default function AdminDashboard() {
 
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
                       <span className="text-xs text-zinc-400">
-                        {csvInputText ? `${csvInputText.split(/\r?\n/).filter(l => l.trim()).length} lines detected` : "Paste movie titles or upload CSV file above"}
+                        {csvInputText ? `${csvInputText.split(/\r?\n/).filter(l => l.trim()).length} lines detected` : "Paste movie titles or drop CSV file above"}
                       </span>
                       <div className="flex items-center gap-2">
                         <button

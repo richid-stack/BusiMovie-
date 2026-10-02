@@ -36,6 +36,33 @@ import {
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
 import { searchMovies } from "./src/services/movieProvider.js";
 import { getOfficialTrailer } from "./src/services/trailerService.js";
+import * as pdfModule from "pdf-parse";
+
+async function parsePdfBufferToText(buffer: Buffer): Promise<string> {
+  try {
+    if (typeof (pdfModule as any).PDFParse === "function") {
+      const PDFParse = (pdfModule as any).PDFParse;
+      const parser = new PDFParse({ data: buffer });
+      if (typeof parser.load === "function") {
+        await parser.load();
+      }
+      if (typeof parser.getText === "function") {
+        const res = await parser.getText();
+        return typeof res === "string" ? res : (res?.text || "");
+      }
+    }
+
+    const fn = typeof pdfModule === "function" ? pdfModule : (pdfModule as any).default;
+    if (typeof fn === "function") {
+      const res = await fn(buffer);
+      return res?.text || "";
+    }
+  } catch (err: any) {
+    console.warn("[PDFParse] Extraction error:", err.message);
+  }
+  return "";
+}
+
 import {
   initCrawlerService,
   getCrawlerStatus,
@@ -888,14 +915,33 @@ async function startServer() {
     }
   });
 
-  // ================= BATCH CRON CSV INDEXER ROUTES =================
+  // ================= BATCH CRON CSV / PDF / MD INDEXER ROUTES =================
   app.post("/api/crawler/cron/upload-csv", async (req, res) => {
     try {
-      const { csvContent, sourceName } = req.body;
-      if (!csvContent || typeof csvContent !== "string") {
-        return res.status(400).json({ error: "csvContent string is required" });
+      const { csvContent, fileBase64, sourceName } = req.body;
+      let textToParse = (csvContent as string) || "";
+
+      // Handle PDF uploads sent as base64 or data URLs
+      const isPdf = (sourceName && sourceName.toLowerCase().endsWith(".pdf")) ||
+                    (typeof fileBase64 === "string" && fileBase64.length > 0) ||
+                    (typeof csvContent === "string" && csvContent.startsWith("data:application/pdf;base64,"));
+
+      if (isPdf) {
+        try {
+          const rawBase64 = (fileBase64 || csvContent).replace(/^data:application\/pdf;base64,/, "");
+          const buffer = Buffer.from(rawBase64, "base64");
+          textToParse = await parsePdfBufferToText(buffer);
+        } catch (pdfErr: any) {
+          console.warn("[CrawlerUpload] PDF parsing error:", pdfErr.message);
+          return res.status(400).json({ error: "Failed to extract text from PDF document: " + pdfErr.message });
+        }
       }
-      const result = await parseAndQueueCsvMovies(csvContent, sourceName || "batch_upload.csv");
+
+      if (!textToParse || typeof textToParse !== "string" || !textToParse.trim()) {
+        return res.status(400).json({ error: "No readable movie titles found in the uploaded file." });
+      }
+
+      const result = await parseAndQueueCsvMovies(textToParse, sourceName || "batch_upload.csv");
       res.json({ success: true, ...result });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

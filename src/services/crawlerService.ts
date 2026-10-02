@@ -3,6 +3,7 @@ import { searchMovies } from "./movieProvider.js";
 import { getOfficialTrailer } from "./trailerService.js";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
+import axios from "axios";
 
 export interface CrawlerTarget {
   id: number;
@@ -1429,6 +1430,110 @@ export function cleanMovieReleaseTitle(rawInput: string): {
 }
 
 /**
+ * Robust line parser supporting Markdown tables, Markdown lists, Numbered lists,
+ * TSV, CSV, and plain movie name lists.
+ */
+export function extractLineMovieInfo(line: string): {
+  rawTitle: string;
+  cleanTitle: string;
+  year?: string;
+  quality: string;
+} {
+  let text = (line || "").trim();
+  if (!text) return { rawTitle: "", cleanTitle: "", quality: "1080p" };
+
+  // Skip Markdown table divider lines (e.g. |---|---|)
+  if (/^\|?[\s\-:|]+\|?$/.test(text)) {
+    return { rawTitle: "", cleanTitle: "", quality: "1080p" };
+  }
+
+  // Handle Markdown table row format e.g. "| 1 | Inception | 2010 | 1080p |" or "| Avatar | 2009 |"
+  if (text.startsWith("|") && text.endsWith("|")) {
+    const cells = text.split("|").map(c => c.trim()).filter(Boolean);
+    if (cells.length > 0) {
+      let titleIndex = 0;
+      // If first cell is just an index number (1, 2, 3...)
+      if (/^\d+$/.test(cells[0]) && cells.length > 1) {
+        titleIndex = 1;
+      }
+      const rawTitleCell = cells[titleIndex] || "";
+      const yearCell = cells.find((c, idx) => idx !== titleIndex && /^(19\d{2}|20\d{2})$/.test(c));
+      const qualityCell = cells.find((c, idx) => idx !== titleIndex && /(4k|2160p|1080p|720p|480p)/i.test(c));
+      const cleaned = cleanMovieReleaseTitle(rawTitleCell);
+      return {
+        rawTitle: rawTitleCell,
+        cleanTitle: cleaned.cleanTitle,
+        year: yearCell || cleaned.year,
+        quality: qualityCell || cleaned.quality || "1080p"
+      };
+    }
+  }
+
+  // Remove leading numbers, bullet markers, checkbox brackets, and markdown headers
+  // e.g. "1. ", "42) ", "- ", "* ", "• ", "[ ] ", "[x] ", "## "
+  text = text.replace(/^(?:#+\s*|\d+[\.\)\-:]\s*|[-*•]\s*|\[[\sxX]\]\s*)/g, "").trim();
+
+  // Remove markdown links e.g. "[Inception](https://...)" -> "Inception"
+  text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
+  // Remove markdown bold/italics
+  text = text.replace(/[\*_~`]/g, "");
+
+  let rawTitle = text;
+  let targetYear: string | undefined;
+  let targetQuality = "1080p";
+
+  // Check for CSV or TSV columns
+  if (text.includes(",") || text.includes("\t")) {
+    const delim = text.includes("\t") ? "\t" : ",";
+    const parts = text.split(delim).map(c => c.replace(/^["']|["']$/g, "").trim());
+    rawTitle = parts[0] || text;
+    
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
+      if (/^(19\d{2}|20\d{2})$/.test(part)) {
+        targetYear = part;
+      } else if (/(4k|2160p|1080p|720p|480p)/i.test(part)) {
+        targetQuality = part;
+      }
+    }
+  }
+
+  const cleaned = cleanMovieReleaseTitle(rawTitle);
+  return {
+    rawTitle: rawTitle.trim(),
+    cleanTitle: cleaned.cleanTitle,
+    year: targetYear || cleaned.year,
+    quality: cleaned.quality || targetQuality || "1080p"
+  };
+}
+
+/**
+ * Look up official movie release year from open public metadata catalogs (Cinemeta)
+ * with a quick 2.5s timeout. Used when user list does not include the year.
+ */
+export async function lookupMovieYear(cleanTitle: string): Promise<string | undefined> {
+  if (!cleanTitle || cleanTitle.length < 2) return undefined;
+  try {
+    const res = await axios.get(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${encodeURIComponent(cleanTitle)}.json`, {
+      timeout: 2500,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+    });
+    const metas = res.data?.metas;
+    if (Array.isArray(metas) && metas.length > 0) {
+      const best = metas[0];
+      const rel = best.releaseInfo || best.year;
+      if (rel && /^(19\d{2}|20\d{2})/.test(String(rel))) {
+        const match = String(rel).match(/^(19\d{2}|20\d{2})/);
+        return match ? match[1] : undefined;
+      }
+    }
+  } catch (err: any) {
+    // Silently continue if external catalog is unreachable
+  }
+  return undefined;
+}
+
+/**
  * Check if a movie is already present in the Vault with the given quality.
  * Returns { exists: boolean, reason?: string, existingQualities: string[] }
  */
@@ -1491,13 +1596,14 @@ export async function checkVaultDuplicate(cleanTitle: string, requestedQuality: 
 }
 
 /**
- * Ingest CSV text or title list into the crawler_batch_queue with automated deduplication
+ * Ingest CSV, Markdown (.md), PDF text, TSV, or plain list into the crawler_batch_queue
+ * with automated year resolution and deduplication.
  */
 export async function parseAndQueueCsvMovies(csvContent: string, sourceName: string = "batch_upload.csv"): Promise<{
   totalParsed: number;
   queued: number;
   duplicatesSkipped: number;
-  items: Array<{ title: string; cleanTitle: string; status: string; reason?: string }>;
+  items: Array<{ title: string; cleanTitle: string; year?: string; status: string; reason?: string }>;
 }> {
   // Ensure table exists
   await db.execute(`
@@ -1522,23 +1628,27 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
   let totalParsed = 0;
   let queued = 0;
   let duplicatesSkipped = 0;
-  const processedItems: Array<{ title: string; cleanTitle: string; status: string; reason?: string }> = [];
+  const processedItems: Array<{ title: string; cleanTitle: string; year?: string; status: string; reason?: string }> = [];
 
   for (const rawLine of lines) {
-    // Check if line is CSV header
-    if (/^(title|name|movie|film|movie_title|filename)/i.test(rawLine) && lines.indexOf(rawLine) === 0) {
+    // Check if line is header or divider
+    if (/^(title|name|movie|film|movie_title|filename|#|index|no\.)/i.test(rawLine) && lines.indexOf(rawLine) === 0) {
+      continue;
+    }
+    if (/^[\-=#\*_]{3,}$/.test(rawLine)) {
       continue;
     }
 
-    // Extract title from CSV comma separated line
-    const columns = rawLine.split(",").map(c => c.replace(/^["']|["']$/g, "").trim());
-    const rawTitle = columns[0];
-    if (!rawTitle || rawTitle.length < 2) continue;
+    const parsed = extractLineMovieInfo(rawLine);
+    if (!parsed.cleanTitle || parsed.cleanTitle.length < 2) continue;
 
     totalParsed++;
-    const parsed = cleanMovieReleaseTitle(rawTitle);
-    const targetQuality = columns[1] && /(4k|1080p|720p|480p)/i.test(columns[1]) ? columns[1] : (parsed.quality || "1080p");
-    const targetYear = columns[2] && /^\d{4}$/.test(columns[2]) ? columns[2] : parsed.year;
+    let finalYear = parsed.year;
+
+    // If year was not in user input, attempt fast open metadata lookup
+    if (!finalYear) {
+      finalYear = await lookupMovieYear(parsed.cleanTitle);
+    }
 
     // Check if already in current pending queue
     const inQueue = (await db.execute({
@@ -1549,8 +1659,9 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     if (inQueue.length > 0) {
       duplicatesSkipped++;
       processedItems.push({
-        title: rawTitle,
+        title: parsed.rawTitle,
         cleanTitle: parsed.cleanTitle,
+        year: finalYear,
         status: "duplicate_skipped",
         reason: "Already in batch queue"
       });
@@ -1558,17 +1669,18 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     }
 
     // Check Vault duplication
-    const dupCheck = await checkVaultDuplicate(parsed.cleanTitle, targetQuality);
+    const dupCheck = await checkVaultDuplicate(parsed.cleanTitle, parsed.quality);
     if (dupCheck.isDuplicate) {
       duplicatesSkipped++;
       await db.execute({
         sql: `INSERT INTO crawler_batch_queue (raw_title, clean_title, year, requested_quality, status, last_error, source_csv) 
               VALUES (?, ?, ?, ?, 'duplicate_skipped', ?, ?)`,
-        args: [rawTitle, parsed.cleanTitle, targetYear || null, targetQuality, dupCheck.reason || "Duplicate in Vault", sourceName]
+        args: [parsed.rawTitle, parsed.cleanTitle, finalYear || null, parsed.quality, dupCheck.reason || "Duplicate in Vault", sourceName]
       });
       processedItems.push({
-        title: rawTitle,
+        title: parsed.rawTitle,
         cleanTitle: parsed.cleanTitle,
+        year: finalYear,
         status: "duplicate_skipped",
         reason: dupCheck.reason
       });
@@ -1577,11 +1689,12 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
       await db.execute({
         sql: `INSERT INTO crawler_batch_queue (raw_title, clean_title, year, requested_quality, status, source_csv) 
               VALUES (?, ?, ?, ?, 'pending', ?)`,
-        args: [rawTitle, parsed.cleanTitle, targetYear || null, targetQuality, sourceName]
+        args: [parsed.rawTitle, parsed.cleanTitle, finalYear || null, parsed.quality, sourceName]
       });
       processedItems.push({
-        title: rawTitle,
+        title: parsed.rawTitle,
         cleanTitle: parsed.cleanTitle,
+        year: finalYear,
         status: "pending",
         reason: dupCheck.reason || "Queued for cron crawl"
       });
@@ -1591,8 +1704,8 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
   logActivity({
     type: "channel_crawl",
     source: sourceName,
-    title: `CSV Batch Ingested: ${queued} queued, ${duplicatesSkipped} duplicates filtered`,
-    details: `Total parsed: ${totalParsed} titles from ${sourceName}.`,
+    title: `Batch Ingested: ${queued} queued, ${duplicatesSkipped} duplicates filtered`,
+    details: `Parsed ${totalParsed} titles from ${sourceName}. Missing years automatically resolved.`,
     status: "success"
   });
 
@@ -1611,6 +1724,7 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
  * - Bot failover rotation across active bots
  * - Safe inter-item pacing delays (7s)
  * - Automatic indexing to vault upon discovery
+ * - Automatic Release Year extraction & metadata enrichment from bot responses
  */
 export async function processCronBatch(limit: number = 5): Promise<{
   processed: number;
@@ -1710,18 +1824,38 @@ export async function processCronBatch(limit: number = 5): Promise<{
               botUsedSuccess = bot.bot_username;
               fulfilled++;
 
+              // Auto-discover Release Year from bot button or forwarded media file name
+              let discoveredYear = item.year;
+              if (!discoveredYear) {
+                const fnMatch = fwdRes.fileName?.match(/\b(19\d{2}|20\d{2})\b/);
+                const btnMatch = firstBtn?.text?.match(/\b(19\d{2}|20\d{2})\b/);
+                discoveredYear = fnMatch?.[1] || btnMatch?.[1];
+                if (!discoveredYear) {
+                  discoveredYear = await lookupMovieYear(item.clean_title);
+                }
+              }
+
               await db.execute({
                 sql: `UPDATE crawler_batch_queue SET 
                       status = 'completed', 
                       bot_used = ?, 
+                      year = COALESCE(year, ?),
                       media_file_id = ?, 
                       last_error = NULL, 
                       updated_at = CURRENT_TIMESTAMP 
                       WHERE id = ?`,
-                args: [bot.bot_username, fwdRes.mediaFileId || null, item.id]
+                args: [bot.bot_username, discoveredYear || null, fwdRes.mediaFileId || null, item.id]
               });
 
-              logs.push(`✅ Successfully indexed "${item.clean_title}" into Vault via ${bot.bot_username}!`);
+              // Ensure Vault media_files record is updated with discovered year
+              if (discoveredYear && fwdRes.mediaFileId) {
+                await db.execute({
+                  sql: "UPDATE media_files SET year = ? WHERE id = ? AND (year IS NULL OR year = '')",
+                  args: [discoveredYear, fwdRes.mediaFileId]
+                });
+              }
+
+              logs.push(`✅ Successfully indexed "${item.clean_title}" ${discoveredYear ? `(${discoveredYear}) ` : ""}into Vault via ${bot.bot_username}!`);
               break;
             }
           } else {
