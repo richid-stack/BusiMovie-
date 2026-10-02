@@ -46,6 +46,7 @@ import {
   runChannelBackfill,
   getSearchBots,
   addSearchBot,
+  updateSearchBot,
   deleteSearchBot,
   testQuerySearchBot,
   getCrawlerLogs,
@@ -58,7 +59,13 @@ import {
   saveDirectSessionString,
   setEffectiveVaultChannelId,
   fetchAndForwardBotMedia,
-  getJoinedDialogs
+  getJoinedDialogs,
+  parseAndQueueCsvMovies,
+  processCronBatch,
+  configureCronJob,
+  getCronStatus,
+  getCronBatchQueue,
+  clearCronBatchQueue
 } from "./src/services/crawlerService.js";
 
 async function startServer() {
@@ -803,6 +810,16 @@ async function startServer() {
     }
   });
 
+  app.put("/api/crawler/bots/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const success = await updateSearchBot(id, req.body);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete("/api/crawler/bots/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
@@ -866,6 +883,69 @@ async function startServer() {
     try {
       const jobs = await getSearchJobs();
       res.json(jobs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ================= BATCH CRON CSV INDEXER ROUTES =================
+  app.post("/api/crawler/cron/upload-csv", async (req, res) => {
+    try {
+      const { csvContent, sourceName } = req.body;
+      if (!csvContent || typeof csvContent !== "string") {
+        return res.status(400).json({ error: "csvContent string is required" });
+      }
+      const result = await parseAndQueueCsvMovies(csvContent, sourceName || "batch_upload.csv");
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/cron/status", async (req, res) => {
+    try {
+      const status = await getCronStatus();
+      res.json(status);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/cron/config", (req, res) => {
+    try {
+      const updated = configureCronJob(req.body);
+      res.json({ success: true, config: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/cron/run-batch-now", async (req, res) => {
+    try {
+      const limit = req.body.limit ? parseInt(req.body.limit, 10) : 5;
+      const result = await processCronBatch(limit);
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/crawler/cron/queue", async (req, res) => {
+    try {
+      const status = req.query.status as string | undefined;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+      const queue = await getCronBatchQueue(status, limit);
+      res.json(queue);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/cron/clear-queue", async (req, res) => {
+    try {
+      const type = (req.body.type || "completed") as "all" | "completed" | "failed";
+      const success = await clearCronBatchQueue(type);
+      res.json({ success });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

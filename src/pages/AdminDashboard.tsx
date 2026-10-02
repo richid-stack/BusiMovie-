@@ -5,7 +5,8 @@ import {
   DownloadCloud, Bot, Cpu, PlayCircle, PauseCircle, CheckCircle2, 
   AlertTriangle, Radio, Terminal, PlusCircle, Trash2, Zap, 
   ArrowRight, FastForward, ExternalLink, Play, Phone, KeyRound, 
-  Lock, LogOut, Check, ChevronDown, ChevronUp
+  Lock, LogOut, Check, ChevronDown, ChevronUp, Clock, FileText,
+  UploadCloud, RotateCw, Sliders, ListFilter, Edit2, Save, X
 } from "lucide-react";
 import { 
   Status, 
@@ -78,9 +79,11 @@ export default function AdminDashboard() {
   // Add Bot Form
   const [showAddBotModal, setShowAddBotModal] = useState(false);
   const [botUsername, setBotUsername] = useState("");
-  const [botType, setBotType] = useState<"inline" | "command">("inline");
+  const [botType, setBotType] = useState<"inline" | "command">("command");
   const [botCommandTemplate, setBotCommandTemplate] = useState("/search {query}");
   const [botPriority, setBotPriority] = useState("1");
+  const [editingBot, setEditingBot] = useState<SearchBot | null>(null);
+  const [editingTarget, setEditingTarget] = useState<CrawlerTarget | null>(null);
 
   // Interactive Playground
   const [playgroundQuery, setPlaygroundQuery] = useState("Inception 2010");
@@ -109,6 +112,175 @@ export default function AdminDashboard() {
   const [vaultChannelNotice, setVaultChannelNotice] = useState<string | null>(null);
   const [showManualSession, setShowManualSession] = useState(false);
   const [manualSessionInput, setManualSessionInput] = useState("");
+
+  // ================= BATCH CRON PIPELINE STATE =================
+  const [cronStatus, setCronStatus] = useState<any>(null);
+  const [cronQueue, setCronQueue] = useState<any[]>([]);
+  const [cronFilter, setCronFilter] = useState<string>("all");
+  const [csvInputText, setCsvInputText] = useState("");
+  const [csvSourceName, setCsvSourceName] = useState("movies_list.csv");
+  const [csvUploading, setCsvUploading] = useState(false);
+  const [csvReport, setCsvReport] = useState<any>(null);
+  const [showCsvModal, setShowCsvModal] = useState(false);
+  const [cronBatchSize, setCronBatchSize] = useState("5");
+  const [cronIntervalMins, setCronIntervalMins] = useState("15");
+  const [cronDelayMs, setCronDelayMs] = useState("7000");
+  const [cronMaxRetries, setCronMaxRetries] = useState("3");
+  const [runningBatchNow, setRunningBatchNow] = useState(false);
+  const [cronNotice, setCronNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const fetchCronData = async () => {
+    try {
+      const [statusRes, queueRes] = await Promise.all([
+        fetch("/api/crawler/cron/status"),
+        fetch(`/api/crawler/cron/queue?status=${cronFilter}&limit=100`)
+      ]);
+      if (statusRes.ok) {
+        const s = await statusRes.json();
+        setCronStatus(s);
+        if (s.config) {
+          setCronBatchSize(String(s.config.batchSize || 5));
+          setCronIntervalMins(String(s.config.intervalMinutes || 15));
+          setCronDelayMs(String(s.config.delayBetweenItemsMs || 7000));
+          setCronMaxRetries(String(s.config.maxRetries || 3));
+        }
+      }
+      if (queueRes.ok) {
+        setCronQueue(await queueRes.json());
+      }
+    } catch (e) {
+      console.warn("Cron data fetch error:", e);
+    }
+  };
+
+  const handleUploadCsv = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!csvInputText.trim()) return;
+    setCsvUploading(true);
+    setCsvReport(null);
+    setCronNotice(null);
+
+    try {
+      const res = await fetch("/api/crawler/cron/upload-csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          csvContent: csvInputText,
+          sourceName: csvSourceName.trim() || "batch_upload.csv"
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCsvReport(data);
+        setCronNotice({
+          type: "success",
+          text: `Ingested ${data.totalParsed} movies: ${data.queued} queued for cron crawl, ${data.duplicatesSkipped} duplicates filtered!`
+        });
+        setCsvInputText("");
+        fetchCronData();
+      } else {
+        setCronNotice({ type: "error", text: data.error || "Failed to parse and queue CSV." });
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: err.message });
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
+  const handleToggleCron = async (enable: boolean) => {
+    try {
+      const res = await fetch("/api/crawler/cron/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          isEnabled: enable,
+          batchSize: parseInt(cronBatchSize, 10) || 5,
+          intervalMinutes: parseInt(cronIntervalMins, 10) || 15,
+          delayBetweenItemsMs: parseInt(cronDelayMs, 10) || 7000,
+          maxRetries: parseInt(cronMaxRetries, 10) || 3
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCronNotice({
+          type: "success",
+          text: enable 
+            ? `Cron Job Active! Will crawl ${data.config.batchSize} movies every ${data.config.intervalMinutes} minutes.`
+            : "Cron Job paused."
+        });
+        fetchCronData();
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: err.message });
+    }
+  };
+
+  const handleSaveCronConfig = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch("/api/crawler/cron/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchSize: parseInt(cronBatchSize, 10) || 5,
+          intervalMinutes: parseInt(cronIntervalMins, 10) || 15,
+          delayBetweenItemsMs: parseInt(cronDelayMs, 10) || 7000,
+          maxRetries: parseInt(cronMaxRetries, 10) || 3
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCronNotice({ type: "success", text: "Cron settings saved successfully!" });
+        fetchCronData();
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: err.message });
+    }
+  };
+
+  const handleRunBatchNow = async () => {
+    setRunningBatchNow(true);
+    setCronNotice(null);
+    try {
+      const res = await fetch("/api/crawler/cron/run-batch-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: parseInt(cronBatchSize, 10) || 5 })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCronNotice({
+          type: "success",
+          text: `Batch completed: ${data.fulfilled} fulfilled into Vault, ${data.failed} failed/retry, ${data.skipped} skipped.`
+        });
+        fetchCronData();
+        fetchCrawlerData();
+      } else {
+        setCronNotice({ type: "error", text: data.error || data.message || "Batch run hit an error." });
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: err.message });
+    } finally {
+      setRunningBatchNow(false);
+    }
+  };
+
+  const handleClearQueue = async (type: "all" | "completed" | "failed") => {
+    if (!confirm(`Are you sure you want to clear ${type} items from the queue?`)) return;
+    try {
+      const res = await fetch("/api/crawler/cron/clear-queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type })
+      });
+      if (res.ok) {
+        fetchCronData();
+      }
+    } catch (err) {
+      console.warn("Clear queue error:", err);
+    }
+  };
 
   const handleRequestAuxCode = async (e: FormEvent) => {
     e.preventDefault();
@@ -304,6 +476,7 @@ export default function AdminDashboard() {
         .then(r => r.ok ? r.json() : [])
         .then(d => { if (Array.isArray(d)) setJoinedDialogs(d); })
         .catch(() => {});
+      fetchCronData();
     } catch (err) {
       console.warn("Crawler fetch error:", err);
     }
@@ -503,12 +676,39 @@ export default function AdminDashboard() {
   };
 
   const handleDeleteTarget = async (id: number) => {
-    if (!confirm("Remove this target channel from crawler?")) return;
     try {
-      await fetch(`/api/crawler/targets/${id}`, { method: "DELETE" });
-      fetchCrawlerData();
+      setTargets(prev => prev.filter(t => t.id !== id));
+      const res = await fetch(`/api/crawler/targets/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setBackfillNotice("Target channel removed successfully.");
+        fetchCrawlerData();
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Delete target error:", err);
+    }
+  };
+
+  const handleSaveEditTarget = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editingTarget) return;
+    try {
+      const res = await fetch(`/api/crawler/targets/${editingTarget.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: editingTarget.title,
+          channel_identifier: editingTarget.channel_identifier,
+          min_file_size_mb: editingTarget.min_file_size_mb,
+          quality_filter: editingTarget.quality_filter,
+          status: editingTarget.status
+        })
+      });
+      if (res.ok) {
+        setEditingTarget(null);
+        fetchCrawlerData();
+      }
+    } catch (err) {
+      console.error("Save edit target error:", err);
     }
   };
 
@@ -561,13 +761,70 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleDeleteBot = async (id: number) => {
-    if (!confirm("Remove this search bot from the registry?")) return;
+  const handleQuickToggleBotType = async (b: SearchBot) => {
+    const nextType = b.bot_type === "inline" ? "command" : "inline";
+    const nextTemplate = nextType === "command" ? "/search {query}" : "/search {query}";
     try {
-      await fetch(`/api/crawler/bots/${id}`, { method: "DELETE" });
+      setBots(prev => prev.map(item => item.id === b.id ? { ...item, bot_type: nextType, command_template: nextTemplate } : item));
+      await fetch(`/api/crawler/bots/${b.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bot_type: nextType, command_template: nextTemplate })
+      });
       fetchCrawlerData();
     } catch (err) {
-      console.error(err);
+      console.error("Toggle bot type error:", err);
+    }
+  };
+
+  const handleQuickToggleBotStatus = async (b: SearchBot) => {
+    const nextStatus = b.status === "active" ? "inactive" : "active";
+    try {
+      setBots(prev => prev.map(item => item.id === b.id ? { ...item, status: nextStatus } : item));
+      await fetch(`/api/crawler/bots/${b.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus })
+      });
+      fetchCrawlerData();
+    } catch (err) {
+      console.error("Toggle bot status error:", err);
+    }
+  };
+
+  const handleSaveEditBot = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editingBot) return;
+    try {
+      const res = await fetch(`/api/crawler/bots/${editingBot.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bot_username: editingBot.bot_username.startsWith("@") ? editingBot.bot_username : `@${editingBot.bot_username}`,
+          bot_type: editingBot.bot_type,
+          command_template: editingBot.command_template,
+          priority: editingBot.priority,
+          status: editingBot.status
+        })
+      });
+      if (res.ok) {
+        setEditingBot(null);
+        fetchCrawlerData();
+      }
+    } catch (err) {
+      console.error("Save edit bot error:", err);
+    }
+  };
+
+  const handleDeleteBot = async (id: number) => {
+    try {
+      setBots(prev => prev.filter(b => b.id !== id));
+      const res = await fetch(`/api/crawler/bots/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        fetchCrawlerData();
+      }
+    } catch (err) {
+      console.error("Delete bot error:", err);
     }
   };
 
@@ -636,82 +893,89 @@ export default function AdminDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] text-zinc-300 font-sans p-6 md:p-12">
-      <div className="max-w-7xl mx-auto space-y-10">
+    <div className="min-h-screen bg-[#141414] text-zinc-200 font-sans p-3.5 sm:p-6 md:p-10 overflow-x-hidden">
+      <div className="max-w-7xl mx-auto space-y-6 sm:space-y-8">
         
         {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-zinc-800/50">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-zinc-800">
           <div>
-            <h1 className="text-3xl font-bold text-zinc-100 flex items-center gap-3 tracking-tight">
-              <Database className="w-8 h-8 text-blue-500" />
-              Infrastructure Console
+            <h1 className="text-2xl sm:text-3xl font-bold text-white flex items-center gap-2.5 tracking-tight">
+              <Database className="w-6 h-6 sm:w-7 sm:h-7 text-red-600" />
+              Management Console
             </h1>
-            <p className="text-sm text-zinc-500 mt-2 max-w-2xl">
-              Enterprise-grade dashboard for BusiMovie. Manage cloud synchronization, autonomous MTProto channel crawlers, search bots, and retention workflows.
+            <p className="text-xs sm:text-sm text-zinc-400 mt-1 max-w-2xl">
+              Control center for BusiMovie. Manage cloud sync, MTProto crawlers, search bots, and scheduled batch ingestion.
             </p>
           </div>
-          <div className="flex gap-3">
-             <button onClick={() => setShowAddForm(!showAddForm)} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center gap-2 text-sm font-medium transition shadow-lg shadow-blue-500/20">
+          <div className="flex items-center gap-2.5 flex-wrap">
+             <button 
+               onClick={() => setShowAddForm(!showAddForm)} 
+               className="flex-1 sm:flex-none px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm font-semibold transition border border-zinc-700"
+             >
                <FileVideo className="w-4 h-4" /> Index Media
              </button>
-             <button onClick={() => setActiveTab("automation")} className="px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 rounded-lg flex items-center gap-2 text-sm font-medium transition">
-               <Bot className="w-4 h-4 text-purple-400" /> Userbot Engine
+             <button 
+               onClick={() => setActiveTab("automation")} 
+               className="flex-1 sm:flex-none px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl flex items-center justify-center gap-2 text-xs sm:text-sm font-semibold transition shadow-md"
+             >
+               <Bot className="w-4 h-4" /> Crawlers & Bots
              </button>
           </div>
         </div>
 
         {/* Index Form */}
         {showAddForm && (
-          <form onSubmit={handleManualAdd} className="p-6 bg-zinc-900/50 border border-zinc-800 rounded-2xl space-y-4 animate-in fade-in slide-in-from-top-4">
-            <h3 className="text-sm font-semibold text-zinc-300">Index Media File Reference</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          <form onSubmit={handleManualAdd} className="p-4 sm:p-6 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-4 animate-in fade-in slide-in-from-top-4">
+            <h3 className="text-sm sm:text-base font-semibold text-white">Index Media File Reference</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3.5">
               <div className="sm:col-span-2">
-                <label className="block text-xs text-zinc-500 mb-1.5 font-medium">Movie Title</label>
-                <input type="text" value={newFileTitle} onChange={e => setNewFileTitle(e.target.value)} required className="w-full px-4 py-2.5 bg-zinc-950 border border-zinc-800/80 rounded-lg outline-none focus:border-blue-500 text-sm transition" />
+                <label className="block text-xs text-zinc-300 mb-1.5 font-medium">Movie Title</label>
+                <input type="text" value={newFileTitle} onChange={e => setNewFileTitle(e.target.value)} required className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl outline-none focus:border-zinc-500 text-sm text-white" />
               </div>
               <div>
-                <label className="block text-xs text-zinc-500 mb-1.5 font-medium">Year</label>
-                <input type="text" value={newFileYear} onChange={e => setNewFileYear(e.target.value)} placeholder="e.g. 2024" className="w-full px-4 py-2.5 bg-zinc-950 border border-zinc-800/80 rounded-lg outline-none focus:border-blue-500 text-sm transition" />
+                <label className="block text-xs text-zinc-300 mb-1.5 font-medium">Year</label>
+                <input type="text" value={newFileYear} onChange={e => setNewFileYear(e.target.value)} placeholder="e.g. 2024" className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl outline-none focus:border-zinc-500 text-sm text-white" />
               </div>
               <div>
-                <label className="block text-xs text-zinc-500 mb-1.5 font-medium">Quality</label>
-                <select value={newFileQuality} onChange={e => setNewFileQuality(e.target.value)} className="w-full px-4 py-2.5 bg-zinc-950 border border-zinc-800/80 rounded-lg outline-none focus:border-blue-500 text-sm transition appearance-none">
+                <label className="block text-xs text-zinc-300 mb-1.5 font-medium">Quality</label>
+                <select value={newFileQuality} onChange={e => setNewFileQuality(e.target.value)} className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl outline-none focus:border-zinc-500 text-sm text-white">
                   <option value="1080p">1080p</option><option value="720p">720p</option><option value="4K">4K</option>
                 </select>
               </div>
               <div className="sm:col-span-4">
-                <label className="block text-xs text-zinc-500 mb-1.5 font-medium">Telegram File ID</label>
-                <input type="text" value={newFileId} onChange={e => setNewFileId(e.target.value)} required className="w-full px-4 py-2.5 bg-zinc-950 border border-zinc-800/80 rounded-lg outline-none focus:border-blue-500 text-sm transition" />
+                <label className="block text-xs text-zinc-300 mb-1.5 font-medium">Telegram File ID</label>
+                <input type="text" value={newFileId} onChange={e => setNewFileId(e.target.value)} required className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl outline-none focus:border-zinc-500 text-sm text-white font-mono" />
               </div>
             </div>
-            <div className="flex justify-end gap-3 pt-4">
-              <button type="button" onClick={() => setShowAddForm(false)} className="px-5 py-2.5 text-sm font-medium text-zinc-400 hover:text-white transition">Cancel</button>
-              <button type="submit" className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg shadow-lg shadow-blue-500/20 transition">Save Reference</button>
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button type="button" onClick={() => setShowAddForm(false)} className="px-4 py-2 text-sm text-zinc-400 hover:text-white transition">Cancel</button>
+              <button type="submit" className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-xl transition">Save Reference</button>
             </div>
           </form>
         )}
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-2 border-b border-zinc-800/50 pb-px overflow-x-auto">
+        <div className="flex items-center gap-1.5 sm:gap-2 border-b border-zinc-800 pb-1 overflow-x-auto no-scrollbar">
           {[
             { id: "overview", label: "Overview", icon: Database },
-            { id: "automation", label: "Automation & Crawlers", icon: Bot },
+            { id: "automation", label: "Crawlers & Bots", icon: Bot },
             { id: "requests", label: "User Requests", icon: Bell },
-            { id: "library", label: "Vault Library", icon: HardDrive },
+            { id: "library", label: "Vault Inventory", icon: HardDrive },
             { id: "comms", label: "Engagement", icon: Megaphone }
           ].map(tab => {
             const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
             return (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`px-4 py-2.5 text-sm font-semibold flex items-center gap-2 border-b-2 whitespace-nowrap transition-all ${
-                  activeTab === tab.id 
-                    ? "border-blue-500 text-white" 
-                    : "border-transparent text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+                className={`px-3.5 py-2.5 text-xs sm:text-sm font-semibold flex items-center gap-2 whitespace-nowrap rounded-xl transition-all ${
+                  isActive 
+                    ? "bg-zinc-800 text-white shadow-sm" 
+                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
                 }`}
               >
-                <Icon className={`w-4 h-4 ${activeTab === tab.id ? "text-blue-400" : "text-zinc-500"}`} />
+                <Icon className={`w-4 h-4 ${isActive ? "text-red-500" : "text-zinc-500"}`} />
                 {tab.label}
               </button>
             );
@@ -886,79 +1150,75 @@ export default function AdminDashboard() {
 
         {/* ================= AUTOMATION & CRAWLERS TAB ================= */}
         {activeTab === "automation" && (
-          <div className="space-y-8 animate-in fade-in duration-300">
+          <div className="space-y-6 animate-in fade-in duration-300">
             
             {/* Top KPI Metrics Bar */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <div className="bg-zinc-900/40 border border-zinc-800/60 p-4 rounded-xl">
-                <span className="text-[11px] font-semibold text-zinc-500 uppercase">Target Channels</span>
-                <p className="text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.activeTargets || 0} <span className="text-xs font-normal text-zinc-500">/ {targets.length}</span></p>
-                <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1 mt-1">
-                  <Radio className="w-3 h-3 animate-pulse" /> Real-time Listening
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+              <div className="bg-zinc-900/60 border border-zinc-800/80 p-4 rounded-xl">
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Target Channels</span>
+                <p className="text-xl sm:text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.activeTargets || 0} <span className="text-xs font-normal text-zinc-500">/ {targets.length}</span></p>
+                <span className="text-xs text-emerald-400 font-medium flex items-center gap-1.5 mt-1.5">
+                  <Radio className="w-3.5 h-3.5 animate-pulse" /> Live Monitoring
                 </span>
               </div>
-              <div className="bg-zinc-900/40 border border-zinc-800/60 p-4 rounded-xl">
-                <span className="text-[11px] font-semibold text-zinc-500 uppercase">Search Bots</span>
-                <p className="text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.activeBots || 0} <span className="text-xs font-normal text-zinc-500">Registered</span></p>
-                <span className="text-[10px] text-blue-400 font-medium mt-1 block">Inline & Command</span>
+              <div className="bg-zinc-900/60 border border-zinc-800/80 p-4 rounded-xl">
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Search Bots</span>
+                <p className="text-xl sm:text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.activeBots || 0} <span className="text-xs font-normal text-zinc-500">Active</span></p>
+                <span className="text-xs text-zinc-400 font-medium mt-1.5 block">Priority Fallback</span>
               </div>
-              <div className="bg-zinc-900/40 border border-zinc-800/60 p-4 rounded-xl">
-                <span className="text-[11px] font-semibold text-zinc-500 uppercase">Search Queue</span>
-                <p className="text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.pendingJobsCount || 0} <span className="text-xs font-normal text-zinc-500">Pending</span></p>
-                <span className="text-[10px] text-amber-400 font-medium mt-1 block">Auto-fulfillment on</span>
+              <div className="bg-zinc-900/60 border border-zinc-800/80 p-4 rounded-xl">
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Search Queue</span>
+                <p className="text-xl sm:text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.pendingJobsCount || 0}</p>
+                <span className="text-xs text-amber-400 font-medium mt-1.5 block">Auto-fulfillment</span>
               </div>
-              <div className="bg-zinc-900/40 border border-zinc-800/60 p-4 rounded-xl">
-                <span className="text-[11px] font-semibold text-zinc-500 uppercase">Fulfilled by Bots</span>
-                <p className="text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.fulfilledJobsCount || 0}</p>
-                <span className="text-[10px] text-emerald-400 font-medium mt-1 block">Auto-added to Vault</span>
+              <div className="bg-zinc-900/60 border border-zinc-800/80 p-4 rounded-xl">
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Bot Fulfillments</span>
+                <p className="text-xl sm:text-2xl font-bold text-zinc-100 mt-1">{crawlerStatus?.fulfilledJobsCount || 0}</p>
+                <span className="text-xs text-emerald-400 font-medium mt-1.5 block">Added to Vault</span>
               </div>
-              <div className="bg-zinc-900/40 border border-zinc-800/60 p-4 rounded-xl col-span-2 md:col-span-1">
-                <span className="text-[11px] font-semibold text-zinc-500 uppercase">FloodWait Safety</span>
-                <p className="text-sm font-bold text-emerald-400 mt-2 flex items-center gap-1.5">
+              <div className="bg-zinc-900/60 border border-zinc-800/80 p-4 rounded-xl col-span-2 sm:col-span-1">
+                <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">FloodWait Protection</span>
+                <p className="text-sm sm:text-base font-bold text-emerald-400 mt-1.5 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4" />
-                  {crawlerStatus?.floodWaitActive ? `Cooldown: ${crawlerStatus.floodWaitCooldownSeconds}s` : "Optimal (No Limits)"}
+                  {crawlerStatus?.floodWaitActive ? `Cooldown: ${crawlerStatus.floodWaitCooldownSeconds}s` : "Optimal"}
                 </p>
-                <span className="text-[10px] text-zinc-500 mt-1 block">Adaptive backoff active</span>
+                <span className="text-xs text-zinc-500 mt-1 block">Adaptive Backoff</span>
               </div>
             </div>
 
             {/* Notification alert if backfill or action performed */}
             {backfillNotice && (
-              <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-xl text-sm flex items-center justify-between">
+              <div className="p-4 bg-zinc-900 border border-zinc-800 text-zinc-200 rounded-xl text-sm flex items-center justify-between">
                 <span>{backfillNotice}</span>
-                <button onClick={() => setBackfillNotice(null)} className="text-xs hover:underline">Dismiss</button>
+                <button onClick={() => setBackfillNotice(null)} className="text-xs text-zinc-400 hover:text-white underline">Dismiss</button>
               </div>
             )}
 
             {/* Auxiliary Userbot & Private Storage Vault Card */}
-            <div className="bg-gradient-to-r from-purple-950/30 via-zinc-900/60 to-zinc-900/30 border border-purple-500/20 rounded-2xl p-6 shadow-xl">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-800/80 pb-5">
+            <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-4 sm:p-6 space-y-6">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-800/80 pb-4">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                      MTProto Auxiliary Engine
-                    </span>
-                    <h3 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
-                      Telegram Userbot & Vault Storage Setup
-                    </h3>
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-1">
-                    Connect your auxiliary Telegram account directly in your browser. Powers autonomous background channel crawling, file scraping, and on-demand search bot querying.
+                  <h3 className="text-lg sm:text-xl font-bold text-zinc-100 flex items-center gap-2">
+                    <Bot className="w-5 h-5 text-zinc-300" />
+                    Telegram Userbot & Vault Channel Integration
+                  </h3>
+                  <p className="text-xs sm:text-sm text-zinc-400 mt-1">
+                    Connect your auxiliary account for background crawling and link your private archive channel.
                   </p>
                 </div>
                 <div className="flex items-center gap-2 text-xs flex-wrap">
-                  <span className={`px-2.5 py-1 rounded-md font-semibold flex items-center gap-1.5 ${
+                  <span className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 ${
                     crawlerStatus?.auxiliarySession?.apiIdConfigured 
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
-                      : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                      ? "bg-zinc-800 text-emerald-400 border border-zinc-700" 
+                      : "bg-zinc-800 text-amber-400 border border-zinc-700"
                   }`}>
                     <KeyRound className="w-3.5 h-3.5" />
-                    API ID & Hash: {crawlerStatus?.auxiliarySession?.apiIdConfigured ? "Active" : "Missing"}
+                    API Credentials: {crawlerStatus?.auxiliarySession?.apiIdConfigured ? "Active" : "Missing"}
                   </span>
-                  <span className={`px-2.5 py-1 rounded-md font-semibold flex items-center gap-1.5 ${
+                  <span className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 ${
                     crawlerStatus?.auxiliarySession?.connected 
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
-                      : "bg-zinc-800 text-zinc-400"
+                      ? "bg-zinc-800 text-emerald-400 border border-zinc-700" 
+                      : "bg-zinc-800 text-zinc-400 border border-zinc-700"
                   }`}>
                     <Bot className="w-3.5 h-3.5" />
                     Userbot: {crawlerStatus?.auxiliarySession?.connected ? `@${crawlerStatus.auxiliarySession.username || "Connected"}` : "Standby"}
@@ -967,116 +1227,116 @@ export default function AdminDashboard() {
               </div>
 
               {auxNotice && (
-                <div className={`mt-4 p-3 rounded-xl text-xs flex items-center justify-between ${
+                <div className={`p-3.5 rounded-xl text-xs sm:text-sm flex items-center justify-between ${
                   auxNotice.type === "success" 
-                    ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300" 
-                    : "bg-red-500/10 border border-red-500/20 text-red-300"
+                    ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300"
+                    : "bg-rose-500/10 border border-rose-500/20 text-rose-300"
                 }`}>
                   <span>{auxNotice.text}</span>
-                  <button onClick={() => setAuxNotice(null)} className="hover:underline ml-2">Dismiss</button>
+                  <button onClick={() => setAuxNotice(null)} className="text-xs underline ml-2">Dismiss</button>
                 </div>
               )}
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
                 
                 {/* 1. Auxiliary Telegram Account Authentication */}
-                <div className="bg-zinc-950/50 border border-zinc-800/80 rounded-xl p-5 space-y-4">
+                <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-4 sm:p-5 space-y-4">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-bold text-zinc-200 flex items-center gap-2">
-                      <Phone className="w-4 h-4 text-purple-400" /> 1. Auxiliary Telegram Account
+                    <h4 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                      <Phone className="w-4 h-4 text-zinc-400" /> 1. Auxiliary Telegram Account
                     </h4>
                     {crawlerStatus?.auxiliarySession?.connected && (
                       <button
                         onClick={handleDisconnectAux}
                         disabled={auxLoading}
-                        className="px-2.5 py-1 text-[11px] bg-red-950/40 hover:bg-red-900/50 text-red-400 border border-red-800/40 rounded flex items-center gap-1 transition"
+                        className="px-2.5 py-1 text-xs bg-zinc-900 hover:bg-rose-950/40 text-rose-400 border border-zinc-800 rounded-lg flex items-center gap-1 transition"
                       >
-                        <LogOut className="w-3 h-3" /> Disconnect
+                        <LogOut className="w-3.5 h-3.5" /> Disconnect
                       </button>
                     )}
                   </div>
 
                   {crawlerStatus?.auxiliarySession?.connected ? (
-                    <div className="p-4 bg-emerald-950/20 border border-emerald-800/30 rounded-xl space-y-2">
-                      <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs">
+                    <div className="p-4 bg-zinc-900/80 border border-zinc-800 rounded-xl space-y-2">
+                      <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs sm:text-sm">
                         <CheckCircle2 className="w-4 h-4" /> Live Auxiliary Session Active
                       </div>
-                      <p className="text-xs text-zinc-300">
+                      <p className="text-xs sm:text-sm text-zinc-300">
                         Logged in as <strong className="text-white">@{crawlerStatus.auxiliarySession.username || crawlerStatus.auxiliarySession.firstName}</strong>
-                        {crawlerStatus.auxiliarySession.phone && <span> ({crawlerStatus.auxiliarySession.phone})</span>}.
+                        {crawlerStatus.auxiliarySession.phone && <span className="text-zinc-400"> ({crawlerStatus.auxiliarySession.phone})</span>}.
                       </p>
-                      <p className="text-[11px] text-zinc-500">
-                        Autonomous channel crawler & bot search engine are using this account session with flood-protection.
+                      <p className="text-xs text-zinc-500">
+                        Autonomous channel crawler & search engine are using this account session with flood-protection.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      <p className="text-xs text-zinc-400">
+                      <p className="text-xs sm:text-sm text-zinc-400">
                         Log in with your auxiliary phone number. Telegram will send a verification code directly to your Telegram app.
                       </p>
 
                       {!auxCodeSent ? (
                         <form onSubmit={handleRequestAuxCode} className="space-y-3">
                           <div>
-                            <label className="block text-[11px] text-zinc-400 mb-1">Auxiliary Phone Number (with Country Code)</label>
+                            <label className="block text-xs text-zinc-400 font-medium mb-1.5">Auxiliary Phone Number (with Country Code)</label>
                             <input
                               type="tel"
                               placeholder="+1234567890"
                               value={auxPhone}
                               onChange={e => setAuxPhone(e.target.value)}
                               required
-                              className="w-full px-3.5 py-2 bg-zinc-900 border border-zinc-700/80 rounded-lg text-sm text-white placeholder-zinc-500 outline-none focus:border-purple-500"
+                              className="w-full px-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white placeholder-zinc-500 outline-none focus:border-zinc-500"
                             />
                           </div>
                           <button
                             type="submit"
                             disabled={auxLoading || !auxPhone.trim()}
-                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition"
+                            className="w-full py-2.5 bg-zinc-100 hover:bg-white text-zinc-950 disabled:opacity-50 rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition"
                           >
-                            {auxLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Phone className="w-3.5 h-3.5" />}
+                            {auxLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Phone className="w-4 h-4" />}
                             {auxLoading ? "Connecting to Telegram..." : "Send Telegram Login Code"}
                           </button>
                         </form>
                       ) : (
                         <form onSubmit={handleVerifyAuxCode} className="space-y-3 animate-in fade-in duration-200">
-                          <div className="p-3 bg-purple-950/30 border border-purple-800/40 rounded-lg text-[11px] text-purple-300">
+                          <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-300">
                             Code sent! Open Telegram on your auxiliary account and check the official chat from <strong>Telegram</strong> for the code.
                           </div>
                           <div>
-                            <label className="block text-[11px] text-zinc-400 mb-1">5-Digit Verification Code</label>
+                            <label className="block text-xs text-zinc-400 font-medium mb-1.5">5-Digit Verification Code</label>
                             <input
                               type="text"
                               placeholder="e.g. 58291"
                               value={auxCode}
                               onChange={e => setAuxCode(e.target.value)}
                               required
-                              className="w-full px-3.5 py-2 bg-zinc-900 border border-zinc-700/80 rounded-lg text-sm text-white placeholder-zinc-500 outline-none focus:border-purple-500 tracking-widest font-mono"
+                              className="w-full px-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white placeholder-zinc-500 outline-none focus:border-zinc-500 tracking-widest font-mono"
                             />
                           </div>
                           <div>
-                            <label className="block text-[11px] text-zinc-400 mb-1">2FA Password (Only if enabled on account)</label>
+                            <label className="block text-xs text-zinc-400 font-medium mb-1.5">2FA Password (If enabled on account)</label>
                             <input
                               type="password"
                               placeholder="Optional 2-Step Password"
                               value={auxPassword}
                               onChange={e => setAuxPassword(e.target.value)}
-                              className="w-full px-3.5 py-2 bg-zinc-900 border border-zinc-700/80 rounded-lg text-sm text-white placeholder-zinc-500 outline-none focus:border-purple-500"
+                              className="w-full px-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white placeholder-zinc-500 outline-none focus:border-zinc-500"
                             />
                           </div>
                           <div className="flex gap-2">
                             <button
                               type="button"
                               onClick={() => setAuxCodeSent(false)}
-                              className="px-3 py-2 text-xs text-zinc-400 hover:text-white"
+                              className="px-4 py-2.5 text-xs text-zinc-400 hover:text-white bg-zinc-900 border border-zinc-800 rounded-xl"
                             >
                               Back
                             </button>
                             <button
                               type="submit"
                               disabled={auxLoading || !auxCode.trim()}
-                              className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition"
+                              className="flex-1 py-2.5 bg-zinc-100 hover:bg-white text-zinc-950 disabled:opacity-50 rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition"
                             >
-                              {auxLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                              {auxLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                               {auxLoading ? "Verifying..." : "Verify & Save Session"}
                             </button>
                           </div>
@@ -1084,13 +1344,13 @@ export default function AdminDashboard() {
                       )}
 
                       {/* Manual Session String Expander */}
-                      <div className="pt-2 border-t border-zinc-800/60">
+                      <div className="pt-2 border-t border-zinc-800/80">
                         <button
                           type="button"
                           onClick={() => setShowManualSession(!showManualSession)}
-                          className="text-[11px] text-zinc-500 hover:text-zinc-300 flex items-center gap-1"
+                          className="text-xs text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5"
                         >
-                          {showManualSession ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                          {showManualSession ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                           Or paste pre-generated StringSession
                         </button>
 
@@ -1101,12 +1361,12 @@ export default function AdminDashboard() {
                               placeholder="Paste Telethon or GramJS 1BVts..."
                               value={manualSessionInput}
                               onChange={e => setManualSessionInput(e.target.value)}
-                              className="w-full p-2 bg-zinc-900 border border-zinc-800 rounded text-xs text-white font-mono"
+                              className="w-full p-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-white font-mono"
                             />
                             <button
                               type="submit"
                               disabled={auxLoading || !manualSessionInput.trim()}
-                              className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-xs"
+                              className="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-semibold"
                             >
                               Save StringSession
                             </button>
@@ -1118,91 +1378,87 @@ export default function AdminDashboard() {
                 </div>
 
                 {/* 2. Private Storage Vault Channel */}
-                <div className="bg-zinc-950/50 border border-zinc-800/80 rounded-xl p-5 space-y-4">
-                  <h4 className="text-sm font-bold text-zinc-200 flex items-center gap-2">
-                    <Database className="w-4 h-4 text-purple-400" /> 2. Private Storage Vault Channel
+                <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-4 sm:p-5 space-y-4">
+                  <h4 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-zinc-400" /> 2. Private Storage Vault Channel
                   </h4>
-                  <p className="text-xs text-zinc-400">
+                  <p className="text-xs sm:text-sm text-zinc-400">
                     Your private Telegram channel where movies are archived. The bot must be added as an Administrator.
                   </p>
 
-                  <div className="p-3 bg-zinc-900/60 border border-zinc-800 rounded-lg text-xs space-y-1">
-                    <div className="text-[11px] text-zinc-500 uppercase font-semibold flex items-center justify-between">
+                  <div className="p-3.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs space-y-1">
+                    <div className="text-xs text-zinc-500 uppercase font-semibold flex items-center justify-between">
                       <span>Active Storage Channel</span>
                       {crawlerStatus?.auxiliarySession?.vaultChannelId && (
-                        <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded font-mono">
+                        <span className="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded font-mono">
                           Linked & Active
                         </span>
                       )}
                     </div>
-                    <div className="font-mono text-purple-400 font-bold">
+                    <div className="font-mono text-zinc-200 font-bold text-sm">
                       {crawlerStatus?.auxiliarySession?.vaultChannelId || "Not configured yet"}
                     </div>
                   </div>
 
                   {vaultChannelNotice && (
-                    <div className="p-2.5 bg-purple-500/10 border border-purple-500/20 text-purple-300 rounded text-xs">
+                    <div className="p-3 bg-zinc-900 border border-zinc-800 text-zinc-200 rounded-xl text-xs">
                       {vaultChannelNotice}
                     </div>
                   )}
 
                   <form onSubmit={handleSaveVaultChannel} className="space-y-3">
                     <div>
-                      <label className="block text-[11px] text-zinc-400 mb-1">Change / Update Storage Channel ID</label>
+                      <label className="block text-xs text-zinc-400 font-medium mb-1.5">Update Storage Channel ID</label>
                       <input
                         type="text"
                         placeholder="e.g. -1004314551318"
                         value={vaultChannelInput}
                         onChange={e => setVaultChannelInput(e.target.value)}
-                        className="w-full px-3.5 py-2 bg-zinc-900 border border-zinc-700/80 rounded-lg text-sm text-white placeholder-zinc-500 outline-none focus:border-purple-500 font-mono"
+                        className="w-full px-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white placeholder-zinc-500 outline-none focus:border-zinc-500 font-mono"
                       />
                     </div>
                     <button
                       type="submit"
                       disabled={vaultChannelSaving || !vaultChannelInput.trim()}
-                      className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition"
+                      className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition"
                     >
-                      {vaultChannelSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                      {vaultChannelSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                       {vaultChannelSaving ? "Saving..." : "Update Vault Channel ID"}
                     </button>
                   </form>
-
-                  <div className="text-[11px] text-zinc-500 leading-relaxed bg-zinc-900/30 p-2.5 rounded border border-zinc-800/40">
-                    💡 <strong>Single Channel Architecture:</strong> All manual uploads and autonomous crawler discoveries share your main private channel (<code>{crawlerStatus?.auxiliarySession?.vaultChannelId || "-1004314551318"}</code>). Both your primary bot and auxiliary userbot store files here.
-                  </div>
                 </div>
 
               </div>
             </div>
 
             {/* Grid: Channels Crawler & External Bot Registry */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8">
               
               {/* Left Column: Target Channels Crawler (7 cols) */}
-              <div className="lg:col-span-7 space-y-6">
-                <div className="flex items-center justify-between">
+              <div className="lg:col-span-7 space-y-4 sm:space-y-6">
+                <div className="flex items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-xl font-bold text-zinc-100 flex items-center gap-2">
-                      <Radio className="w-5 h-5 text-purple-500" /> Monitored Channels & Vault Forwarder
+                    <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                      <Radio className="w-5 h-5 text-red-500" /> Monitored Channels
                     </h2>
-                    <p className="text-xs text-zinc-500 mt-1">Autonomous crawler monitors these channels and forwards movies to your private vault.</p>
+                    <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">Autonomous crawler monitors these channels and forwards movies to your vault.</p>
                   </div>
                   <button 
                     onClick={() => setShowAddTargetModal(!showAddTargetModal)}
-                    className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                    className="px-3.5 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition shrink-0 shadow-sm"
                   >
-                    <PlusCircle className="w-3.5 h-3.5" /> Add Channel
+                    <PlusCircle className="w-4 h-4" /> Add Channel
                   </button>
                 </div>
 
                 {/* Add Target Modal Form */}
                 {showAddTargetModal && (
-                  <form onSubmit={handleAddTarget} className="p-5 bg-zinc-900/70 border border-purple-500/30 rounded-2xl space-y-4 animate-in fade-in duration-200">
-                    <h4 className="text-sm font-bold text-purple-300">Add Target Channel to Monitor</h4>
+                  <form onSubmit={handleAddTarget} className="p-4 sm:p-5 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-4 animate-in fade-in duration-200">
+                    <h4 className="text-sm sm:text-base font-bold text-white">Add Target Channel to Monitor</h4>
                     
                     {joinedDialogs.length > 0 && (
-                      <div className="p-3 bg-purple-950/30 border border-purple-800/40 rounded-xl space-y-1.5">
-                        <label className="block text-[11px] text-purple-300 font-semibold">
+                      <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl space-y-1.5">
+                        <label className="block text-xs text-zinc-300 font-semibold">
                           ⚡ Quick Select from Channels & Groups You've Joined ({joinedDialogs.length})
                         </label>
                         <select
@@ -1214,7 +1470,7 @@ export default function AdminDashboard() {
                             }
                           }}
                           defaultValue=""
-                          className="w-full px-3 py-2 bg-zinc-900 border border-purple-700/60 rounded-lg text-xs text-white outline-none focus:border-purple-400"
+                          className="w-full px-3 py-2 bg-zinc-900 border border-zinc-700 rounded-lg text-xs sm:text-sm text-white outline-none focus:border-zinc-500"
                         >
                           <option value="" disabled>-- Pick a channel joined by auxiliary account --</option>
                           {joinedDialogs.map(d => (
@@ -1228,41 +1484,41 @@ export default function AdminDashboard() {
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Channel Username or Link</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Channel Username or Link</label>
                         <input 
                           type="text" 
                           placeholder="@MoviesChannel or https://t.me/..." 
                           value={targetIdentifier} 
                           onChange={e => setTargetIdentifier(e.target.value)} 
                           required 
-                          className="w-full px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm outline-none focus:border-purple-500 text-white" 
+                          className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm outline-none focus:border-zinc-500 text-white" 
                         />
                       </div>
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Friendly Display Name</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Friendly Display Name</label>
                         <input 
                           type="text" 
                           placeholder="Cinema 1080p Releases" 
                           value={targetTitle} 
                           onChange={e => setTargetTitle(e.target.value)} 
-                          className="w-full px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm outline-none focus:border-purple-500 text-white" 
+                          className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm outline-none focus:border-zinc-500 text-white" 
                         />
                       </div>
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Min File Size (MB)</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Min File Size (MB)</label>
                         <input 
                           type="number" 
                           value={targetMinSize} 
                           onChange={e => setTargetMinSize(e.target.value)} 
-                          className="w-full px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm outline-none focus:border-purple-500 text-white" 
+                          className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm outline-none focus:border-zinc-500 text-white" 
                         />
                       </div>
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Quality Filter</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Quality Filter</label>
                         <select 
                           value={targetQuality} 
                           onChange={e => setTargetQuality(e.target.value)} 
-                          className="w-full px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm outline-none focus:border-purple-500 text-white"
+                          className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm outline-none focus:border-zinc-500 text-white"
                         >
                           <option value="all">All Qualities (720p+)</option>
                           <option value="1080p">1080p Only</option>
@@ -1270,9 +1526,9 @@ export default function AdminDashboard() {
                         </select>
                       </div>
                     </div>
-                    <div className="flex justify-end gap-2 pt-2">
-                      <button type="button" onClick={() => setShowAddTargetModal(false)} className="px-4 py-1.5 text-xs text-zinc-400 hover:text-white">Cancel</button>
-                      <button type="submit" className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg">Save Channel</button>
+                    <div className="flex justify-end gap-2.5 pt-2">
+                      <button type="button" onClick={() => setShowAddTargetModal(false)} className="px-4 py-2 text-sm text-zinc-400 hover:text-white">Cancel</button>
+                      <button type="submit" className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-xl">Save Channel</button>
                     </div>
                   </form>
                 )}
@@ -1280,70 +1536,143 @@ export default function AdminDashboard() {
                 {/* Target Channels Cards */}
                 <div className="space-y-3">
                   {targets.map(target => (
-                    <div key={target.id} className="p-4 bg-zinc-900/40 border border-zinc-800/70 rounded-xl hover:bg-zinc-900/60 transition flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-bold text-zinc-100 text-sm">{target.title}</h4>
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                            target.status === "active" 
-                              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
-                              : target.status === "syncing"
-                              ? "bg-purple-500/10 text-purple-400 border border-purple-500/20 animate-pulse"
-                              : "bg-zinc-800 text-zinc-400"
-                          }`}>
-                            {target.status}
-                          </span>
-                        </div>
-                        <p className="text-xs text-zinc-400 mt-1 font-mono">{target.channel_identifier}</p>
-                        <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-500">
-                          <span>Min: <strong className="text-zinc-400">{target.min_file_size_mb}MB</strong></span>
-                          <span>•</span>
-                          <span>Filter: <strong className="text-zinc-400 uppercase">{target.quality_filter}</strong></span>
-                          <span>•</span>
-                          <span>Discovered: <strong className="text-purple-400">{target.total_files_found || 0} files</strong></span>
-                        </div>
-                      </div>
+                    <div key={target.id} className="p-4 sm:p-5 bg-zinc-900 border border-zinc-800 rounded-2xl hover:border-zinc-700 transition flex flex-col justify-between gap-4">
+                      {editingTarget && editingTarget.id === target.id ? (
+                        <form onSubmit={handleSaveEditTarget} className="space-y-3 w-full animate-in fade-in duration-200">
+                          <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                            <span className="text-sm font-bold text-white">Edit Target Channel #{target.id}</span>
+                            <button type="button" onClick={() => setEditingTarget(null)} className="text-zinc-400 hover:text-white p-1">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs sm:text-sm">
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1 font-medium">Display Title</label>
+                              <input
+                                type="text"
+                                value={editingTarget.title}
+                                onChange={e => setEditingTarget({ ...editingTarget, title: e.target.value })}
+                                required
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-white outline-none focus:border-zinc-500 text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1 font-medium">Channel Identifier / Link</label>
+                              <input
+                                type="text"
+                                value={editingTarget.channel_identifier}
+                                onChange={e => setEditingTarget({ ...editingTarget, channel_identifier: e.target.value })}
+                                required
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-white outline-none focus:border-zinc-500 font-mono text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1 font-medium">Min File Size (MB)</label>
+                              <input
+                                type="number"
+                                value={editingTarget.min_file_size_mb}
+                                onChange={e => setEditingTarget({ ...editingTarget, min_file_size_mb: parseInt(e.target.value, 10) || 100 })}
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-white outline-none focus:border-zinc-500 text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1 font-medium">Quality Filter</label>
+                              <select
+                                value={editingTarget.quality_filter}
+                                onChange={e => setEditingTarget({ ...editingTarget, quality_filter: e.target.value })}
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-white outline-none focus:border-zinc-500 text-sm"
+                              >
+                                <option value="all">All Qualities (720p+)</option>
+                                <option value="1080p">1080p Only</option>
+                                <option value="4k">4K Only</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2 pt-2">
+                            <button type="button" onClick={() => setEditingTarget(null)} className="px-3.5 py-1.5 text-xs sm:text-sm text-zinc-400 hover:text-white">Cancel</button>
+                            <button type="submit" className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl flex items-center gap-1.5">
+                              <Save className="w-3.5 h-3.5" /> Save Changes
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="font-bold text-white text-sm sm:text-base">{target.title}</h4>
+                              <button
+                                onClick={() => handleToggleTargetStatus(target)}
+                                className={`px-2.5 py-0.5 rounded-md text-xs font-semibold uppercase transition ${
+                                  target.status === "active" 
+                                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" 
+                                    : target.status === "syncing"
+                                    ? "bg-zinc-800 text-white animate-pulse"
+                                    : "bg-zinc-800 text-zinc-400"
+                                }`}
+                                title="Click to toggle active / paused status"
+                              >
+                                {target.status}
+                              </button>
+                            </div>
+                            <p className="text-xs sm:text-sm text-zinc-400 font-mono">{target.channel_identifier}</p>
+                            <div className="flex items-center gap-2.5 pt-1 text-xs text-zinc-400 flex-wrap">
+                              <span>Min: <strong className="text-zinc-200">{target.min_file_size_mb}MB</strong></span>
+                              <span>•</span>
+                              <span>Quality: <strong className="text-zinc-200 uppercase">{target.quality_filter}</strong></span>
+                              <span>•</span>
+                              <span>Indexed: <strong className="text-zinc-200">{target.total_files_found || 0} files</strong></span>
+                            </div>
+                          </div>
 
-                      {/* Channel Actions */}
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5">
-                          <select 
-                            value={backfillDepth} 
-                            onChange={e => setBackfillDepth(parseInt(e.target.value, 10))}
-                            className="bg-transparent text-[11px] px-2 py-1 text-zinc-400 outline-none"
-                          >
-                            <option value={20}>20 msgs</option>
-                            <option value={50}>50 msgs</option>
-                            <option value={100}>100 msgs</option>
-                          </select>
-                          <button
-                            onClick={() => handleRunBackfill(target.id)}
-                            disabled={backfillingId === target.id}
-                            className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white rounded text-[11px] font-semibold transition flex items-center gap-1 disabled:opacity-50"
-                          >
-                            <FastForward className="w-3 h-3" />
-                            {backfillingId === target.id ? "Crawling..." : "Crawl"}
-                          </button>
+                          {/* Channel Actions - Full width & clean touch buttons on mobile */}
+                          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap pt-2 sm:pt-0 border-t sm:border-t-0 border-zinc-800">
+                            <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-xl p-1">
+                              <select 
+                                value={backfillDepth} 
+                                onChange={e => setBackfillDepth(parseInt(e.target.value, 10))}
+                                className="bg-transparent text-xs px-2 py-1.5 text-zinc-300 outline-none"
+                              >
+                                <option value={20}>20 msgs</option>
+                                <option value={50}>50 msgs</option>
+                                <option value={100}>100 msgs</option>
+                              </select>
+                              <button
+                                onClick={() => handleRunBackfill(target.id)}
+                                disabled={backfillingId === target.id}
+                                className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <FastForward className="w-3.5 h-3.5" />
+                                {backfillingId === target.id ? "Crawling..." : "Crawl"}
+                              </button>
+                            </div>
+                            <button
+                              onClick={() => setEditingTarget(target)}
+                              className="p-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition"
+                              title="Edit Channel Parameters"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleToggleTargetStatus(target)}
+                              className="p-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl transition"
+                              title={target.status === "active" ? "Pause Crawler" : "Activate Crawler"}
+                            >
+                              {target.status === "active" ? <PauseCircle className="w-4 h-4 text-amber-400" /> : <PlayCircle className="w-4 h-4 text-emerald-400" />}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteTarget(target.id)}
+                              className="p-2.5 bg-zinc-800 hover:bg-rose-950/50 text-zinc-400 hover:text-rose-400 rounded-xl transition border border-transparent hover:border-rose-500/30"
+                              title="Delete Channel"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
-                        <button
-                          onClick={() => handleToggleTargetStatus(target)}
-                          className="p-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition"
-                          title={target.status === "active" ? "Pause Crawler" : "Activate Crawler"}
-                        >
-                          {target.status === "active" ? <PauseCircle className="w-4 h-4 text-amber-400" /> : <PlayCircle className="w-4 h-4 text-emerald-400" />}
-                        </button>
-                        <button
-                          onClick={() => handleDeleteTarget(target.id)}
-                          className="p-1.5 bg-zinc-800 hover:bg-rose-900/30 text-zinc-400 hover:text-rose-400 rounded-lg transition"
-                          title="Delete Channel"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
+                      )}
                     </div>
                   ))}
                   {targets.length === 0 && (
-                    <div className="p-8 text-center text-zinc-500 text-sm border border-zinc-800/60 rounded-xl">
+                    <div className="p-8 text-center text-zinc-500 text-sm border border-zinc-800 rounded-2xl bg-zinc-900/40">
                       No channels added yet. Click "+ Add Channel" to start autonomous crawling.
                     </div>
                   )}
@@ -1351,112 +1680,249 @@ export default function AdminDashboard() {
               </div>
 
               {/* Right Column: External Bot Query Registry & Interactive Playground (5 cols) */}
-              <div className="lg:col-span-5 space-y-6">
-                <div className="flex items-center justify-between">
+              <div className="lg:col-span-5 space-y-4 sm:space-y-6">
+                <div className="flex items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-xl font-bold text-zinc-100 flex items-center gap-2">
-                      <Cpu className="w-5 h-5 text-blue-500" /> External Search Bots
+                    <h2 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                      <Cpu className="w-5 h-5 text-red-500" /> External Search Bots
                     </h2>
-                    <p className="text-xs text-zinc-500 mt-1">Queried on demand via MTProto client.</p>
+                    <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">Queried on demand via MTProto client in priority order.</p>
                   </div>
                   <button 
                     onClick={() => setShowAddBotModal(!showAddBotModal)}
-                    className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                    className="px-3.5 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition shrink-0 shadow-sm"
                   >
-                    <PlusCircle className="w-3.5 h-3.5" /> Register Bot
+                    <PlusCircle className="w-4 h-4" /> Register Bot
                   </button>
                 </div>
 
                 {/* Add Bot Modal Form */}
                 {showAddBotModal && (
-                  <form onSubmit={handleAddBot} className="p-5 bg-zinc-900/70 border border-blue-500/30 rounded-2xl space-y-3 animate-in fade-in duration-200">
-                    <h4 className="text-sm font-bold text-blue-300">Register Telegram Search Bot</h4>
+                  <form onSubmit={handleAddBot} className="p-4 sm:p-5 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-3.5 animate-in fade-in duration-200">
+                    <h4 className="text-sm sm:text-base font-bold text-white">Register Telegram Search Bot</h4>
                     <div>
-                      <label className="block text-[11px] text-zinc-400 mb-1">Bot Username</label>
+                      <label className="block text-xs text-zinc-300 mb-1 font-medium">Bot Username</label>
                       <input 
                         type="text" 
-                        placeholder="@TGMovieSearchBot" 
+                        placeholder="@iPapkornEzPzBot" 
                         value={botUsername} 
                         onChange={e => setBotUsername(e.target.value)} 
                         required 
-                        className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-white outline-none focus:border-blue-500" 
+                        className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-white outline-none focus:border-zinc-500 font-mono" 
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Query Type</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Query Type</label>
                         <select 
                           value={botType} 
-                          onChange={e => setBotType(e.target.value as any)} 
-                          className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-white"
+                          onChange={e => {
+                            const t = e.target.value as any;
+                            setBotType(t);
+                            setBotCommandTemplate(t === "command" ? "/search {query}" : "/search {query}");
+                          }} 
+                          className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white"
                         >
-                          <option value="inline">Inline (@bot query)</option>
                           <option value="command">Command (/search query)</option>
+                          <option value="inline">Inline (@bot query)</option>
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[11px] text-zinc-400 mb-1">Priority</label>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Priority (1 = Top)</label>
                         <input 
                           type="number" 
                           min={1} 
                           max={10} 
                           value={botPriority} 
                           onChange={e => setBotPriority(e.target.value)} 
-                          className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-white" 
+                          className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white" 
                         />
                       </div>
                     </div>
+                    <div>
+                      <label className="block text-xs text-zinc-300 mb-1 font-medium">Command Template</label>
+                      <input 
+                        type="text" 
+                        placeholder="/search {query}" 
+                        value={botCommandTemplate} 
+                        onChange={e => setBotCommandTemplate(e.target.value)} 
+                        className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white font-mono" 
+                      />
+                    </div>
                     <div className="flex justify-end gap-2 pt-2">
-                      <button type="button" onClick={() => setShowAddBotModal(false)} className="px-3 py-1 text-xs text-zinc-400">Cancel</button>
-                      <button type="submit" className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg">Save</button>
+                      <button type="button" onClick={() => setShowAddBotModal(false)} className="px-3.5 py-1.5 text-xs sm:text-sm text-zinc-400">Cancel</button>
+                      <button type="submit" className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl">Save Bot</button>
                     </div>
                   </form>
                 )}
 
-                {/* Bot Registry Table */}
-                <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl overflow-hidden divide-y divide-zinc-800/50">
+                {/* Bot Registry Cards */}
+                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden divide-y divide-zinc-800">
                   {bots.map(b => (
-                    <div key={b.id} className="p-3.5 flex items-center justify-between text-xs hover:bg-zinc-900/60 transition">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-zinc-200">{b.bot_username}</span>
-                          <span className="px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded text-[10px] font-mono uppercase">{b.bot_type}</span>
-                          <span className="text-[10px] text-zinc-500 font-medium">P{b.priority}</span>
+                    <div key={b.id} className="p-4 text-xs sm:text-sm hover:bg-zinc-850 transition">
+                      {editingBot && editingBot.id === b.id ? (
+                        <form onSubmit={handleSaveEditBot} className="space-y-3 animate-in fade-in duration-200">
+                          <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                            <span className="font-bold text-white text-sm">Edit Search Bot #{b.id}</span>
+                            <button type="button" onClick={() => setEditingBot(null)} className="text-zinc-400 hover:text-white p-1">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1">Username</label>
+                              <input
+                                type="text"
+                                value={editingBot.bot_username}
+                                onChange={e => setEditingBot({ ...editingBot, bot_username: e.target.value })}
+                                required
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1">Query Type</label>
+                              <select
+                                value={editingBot.bot_type}
+                                onChange={e => setEditingBot({ ...editingBot, bot_type: e.target.value as any })}
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white"
+                              >
+                                <option value="command">Command (/search)</option>
+                                <option value="inline">Inline (@bot)</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-xs text-zinc-300 mb-1">Command Template</label>
+                              <input
+                                type="text"
+                                value={editingBot.command_template}
+                                onChange={e => setEditingBot({ ...editingBot, command_template: e.target.value })}
+                                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white font-mono"
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-xs text-zinc-300 mb-1">Priority</label>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={10}
+                                  value={editingBot.priority}
+                                  onChange={e => setEditingBot({ ...editingBot, priority: parseInt(e.target.value, 10) || 1 })}
+                                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs text-zinc-300 mb-1">Status</label>
+                                <select
+                                  value={editingBot.status}
+                                  onChange={e => setEditingBot({ ...editingBot, status: e.target.value as any })}
+                                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white"
+                                >
+                                  <option value="active">Active</option>
+                                  <option value="inactive">Inactive</option>
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2 pt-2">
+                            <button type="button" onClick={() => setEditingBot(null)} className="px-3 py-1.5 text-zinc-400 hover:text-white text-xs sm:text-sm">Cancel</button>
+                            <button type="submit" className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1.5">
+                              <Save className="w-3.5 h-3.5" /> Save
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-white text-sm sm:text-base">{b.bot_username}</span>
+                              
+                              {/* 1-Click Interactive Type Toggle Badge */}
+                              <button
+                                onClick={() => handleQuickToggleBotType(b)}
+                                className={`px-2 py-0.5 rounded text-xs font-mono uppercase font-bold transition flex items-center gap-1 border ${
+                                  b.bot_type === "inline"
+                                    ? "bg-zinc-800 text-white border-zinc-700 hover:bg-zinc-700"
+                                    : "bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700"
+                                }`}
+                                title="Click to toggle between Command and Inline mode"
+                              >
+                                <RotateCw className="w-3 h-3 text-red-500" />
+                                {b.bot_type}
+                              </button>
+
+                              {/* 1-Click Active / Inactive Status Toggle */}
+                              <button
+                                onClick={() => handleQuickToggleBotStatus(b)}
+                                className={`px-2 py-0.5 rounded text-xs font-medium transition ${
+                                  b.status === "active"
+                                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20"
+                                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                                }`}
+                                title="Click to activate / pause this bot"
+                              >
+                                {b.status}
+                              </button>
+
+                              <span className="text-xs text-zinc-400 font-mono">Priority #{b.priority}</span>
+                            </div>
+                            <p className="text-xs text-zinc-400 font-mono">{b.command_template}</p>
+                          </div>
+
+                          <div className="flex items-center justify-between sm:justify-end gap-2 pt-2 sm:pt-0 border-t sm:border-t-0 border-zinc-800">
+                            <span className="text-xs text-emerald-400 font-semibold">{b.success_count || 0} hits</span>
+                            
+                            <div className="flex items-center gap-1.5">
+                              <button 
+                                onClick={() => setEditingBot(b)} 
+                                className="p-2 text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-xl transition"
+                                title="Edit bot settings"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+
+                              <button 
+                                onClick={() => handleDeleteBot(b.id)} 
+                                className="p-2 text-zinc-400 hover:text-rose-400 bg-zinc-800 hover:bg-rose-950/40 rounded-xl transition border border-transparent hover:border-rose-500/30"
+                                title="Delete search bot"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                        <p className="text-[11px] text-zinc-500 mt-0.5 font-mono">{b.command_template}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-emerald-400 font-semibold">{b.success_count || 0} hits</span>
-                        <button onClick={() => handleDeleteBot(b.id)} className="p-1 text-zinc-500 hover:text-rose-400">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                      )}
                     </div>
                   ))}
+                  {bots.length === 0 && (
+                    <div className="p-6 text-center text-zinc-500 text-sm">
+                      No search bots registered. Click "+ Register Bot" above to add search bots.
+                    </div>
+                  )}
                 </div>
 
                 {/* Interactive Search Bot Playground */}
-                <div className="bg-zinc-900/60 border border-zinc-800/90 p-5 rounded-2xl space-y-4">
+                <div className="bg-zinc-900 border border-zinc-800 p-4 sm:p-5 rounded-2xl space-y-4">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                      <Zap className="w-4 h-4 text-amber-400" /> Bot Query Playground
+                    <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-red-500" /> Bot Query Playground
                     </h3>
-                    <span className="text-[10px] text-zinc-500 uppercase font-mono">Live MTProto Test</span>
+                    <span className="text-xs text-zinc-500 font-mono">Live MTProto Test</span>
                   </div>
                   
                   <form onSubmit={handleTestPlayground} className="space-y-3">
-                    <div className="flex gap-2">
+                    <div className="flex flex-col sm:flex-row gap-2.5">
                       <input 
                         type="text" 
                         value={playgroundQuery} 
                         onChange={e => setPlaygroundQuery(e.target.value)} 
                         placeholder="Movie name (e.g. Oppenheimer)" 
-                        className="flex-1 px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-white outline-none focus:border-amber-500" 
+                        className="flex-1 px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-white outline-none focus:border-zinc-500" 
                       />
                       <select 
                         value={playgroundBot} 
                         onChange={e => setPlaygroundBot(e.target.value)} 
-                        className="bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-300 px-2.5 outline-none"
+                        className="bg-zinc-950 border border-zinc-800 rounded-xl text-xs sm:text-sm text-zinc-300 px-3 py-2.5 outline-none"
                       >
                         {bots.map(b => (
                           <option key={b.id} value={b.bot_username}>{b.bot_username}</option>
@@ -1465,70 +1931,70 @@ export default function AdminDashboard() {
                       <button 
                         type="submit" 
                         disabled={playgroundLoading || !playgroundQuery.trim()} 
-                        className="px-3.5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition disabled:opacity-50 flex items-center gap-1.5"
+                        className="px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs sm:text-sm font-semibold transition disabled:opacity-50 flex items-center justify-center gap-2 shrink-0"
                       >
-                        {playgroundLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
-                        {playgroundLoading ? "Querying..." : "Test"}
+                        {playgroundLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                        {playgroundLoading ? "Querying..." : "Test Query"}
                       </button>
                     </div>
                   </form>
 
                   {playgroundNotice && (
-                    <div className="p-3 bg-zinc-950 border border-zinc-800 text-zinc-300 text-xs rounded-lg">
+                    <div className="p-3 bg-zinc-950 border border-zinc-800 text-zinc-200 text-xs sm:text-sm rounded-xl">
                       {playgroundNotice}
                     </div>
                   )}
 
                   {/* Playground Result Preview Card */}
                   {playgroundResult && (
-                    <div className="p-4 bg-zinc-950/80 border border-amber-500/30 rounded-xl space-y-3 animate-in fade-in duration-200">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className={`font-bold flex items-center gap-1 ${playgroundResult.found ? "text-emerald-400" : "text-amber-400"}`}>
-                          {playgroundResult.found ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                    <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-3 animate-in fade-in duration-200">
+                      <div className="flex items-center justify-between text-xs sm:text-sm">
+                        <span className={`font-semibold flex items-center gap-1.5 ${playgroundResult.found ? "text-emerald-400" : "text-amber-400"}`}>
+                          {playgroundResult.found ? <CheckCircle2 className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
                           {playgroundResult.found ? `Telegram Bot Replied (${playgroundResult.duration_ms}ms)` : "No Response"}
                         </span>
-                        <span className="px-2 py-0.5 bg-zinc-800 text-zinc-300 rounded text-[10px] font-mono">
+                        <span className="px-2 py-0.5 bg-zinc-800 text-zinc-300 rounded-md text-xs font-mono">
                           {playgroundResult.bot}
                         </span>
                       </div>
 
                       {playgroundResult.error && (
-                        <div className="p-3 bg-red-950/30 border border-red-800/40 text-red-300 text-xs rounded-lg">
+                        <div className="p-3 bg-rose-950/40 border border-rose-800/40 text-rose-300 text-xs rounded-xl">
                           {playgroundResult.error}
                         </div>
                       )}
 
                       {playgroundResult.replyText && (
-                        <div className="p-3 bg-zinc-900/80 rounded-lg text-xs font-mono text-zinc-300 whitespace-pre-wrap max-h-48 overflow-y-auto border border-zinc-800 leading-relaxed">
+                        <div className="p-3 bg-zinc-900 rounded-xl text-xs sm:text-sm font-mono text-zinc-300 whitespace-pre-wrap max-h-48 overflow-y-auto border border-zinc-800 leading-relaxed">
                           {playgroundResult.replyText}
                         </div>
                       )}
 
                       {/* If the bot returned release buttons (e.g. 1080p, 720p, 4K) */}
                       {playgroundResult.buttons && playgroundResult.buttons.length > 0 && (
-                        <div className="space-y-1.5 pt-1">
-                          <p className="text-[11px] text-zinc-400 font-semibold flex items-center gap-1">
-                            <DownloadCloud className="w-3.5 h-3.5 text-amber-400" /> Releases Found &mdash; Click to Forward to Vault:
+                        <div className="space-y-2 pt-1">
+                          <p className="text-xs text-zinc-300 font-semibold flex items-center gap-1.5">
+                            <DownloadCloud className="w-4 h-4 text-red-500" /> Releases Found &mdash; Click to Forward to Vault:
                           </p>
-                          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                          <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                             {playgroundResult.buttons.map((btn: any, idx: number) => (
                               <button
                                 key={idx}
                                 onClick={() => handleForwardPlaygroundResult(btn.row, btn.col, idx)}
                                 disabled={playgroundForwarding}
-                                className="w-full text-left p-2.5 bg-zinc-900 hover:bg-zinc-850 hover:border-emerald-500/50 border border-zinc-800 rounded-lg text-xs transition flex items-center justify-between gap-2 group disabled:opacity-50"
+                                className="w-full text-left p-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 rounded-xl text-xs sm:text-sm transition flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 group disabled:opacity-50"
                               >
-                                <span className="font-mono text-zinc-200 truncate group-hover:text-emerald-300">
+                                <span className="font-mono text-zinc-200 truncate">
                                   {btn.text}
                                 </span>
-                                <span className="shrink-0 px-2 py-1 bg-emerald-600/20 group-hover:bg-emerald-600 text-emerald-400 group-hover:text-white rounded text-[11px] font-semibold flex items-center gap-1 transition">
+                                <span className="shrink-0 px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition">
                                   {playgroundForwarding && forwardingButtonIdx === idx ? (
                                     <>
-                                      <RefreshCw className="w-3 h-3 animate-spin" /> Forwarding...
+                                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Forwarding...
                                     </>
                                   ) : (
                                     <>
-                                      <ArrowRight className="w-3 h-3" /> Forward to Vault
+                                      <ArrowRight className="w-3.5 h-3.5" /> Forward to Vault
                                     </>
                                   )}
                                 </span>
@@ -1543,9 +2009,9 @@ export default function AdminDashboard() {
                         <button
                           onClick={() => handleForwardPlaygroundResult()}
                           disabled={playgroundForwarding}
-                          className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-50"
                         >
-                          <ArrowRight className="w-3.5 h-3.5" />
+                          <ArrowRight className="w-4 h-4" />
                           {playgroundForwarding ? "Forwarding to Vault..." : "Forward Video to Vault Now"}
                         </button>
                       )}
@@ -1557,32 +2023,509 @@ export default function AdminDashboard() {
 
             </div>
 
-            {/* Bottom Row: Live Automation Activity Logs Feed */}
-            <div className="bg-zinc-900/40 border border-zinc-800/60 p-6 rounded-2xl space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-emerald-400" /> Real-Time Crawler & Userbot Execution Feed
-                </h3>
-                <span className="text-[10px] text-zinc-500 font-mono">Auto-refreshes every 10s</span>
-              </div>
-              <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800/80 font-mono text-xs space-y-2 max-h-64 overflow-y-auto">
-                {logs.map(log => (
-                  <div key={log.id} className="flex items-start gap-3 border-b border-zinc-900 pb-1.5 last:border-0">
-                    <span className="text-zinc-600 shrink-0 text-[10px]">{log.timestamp}</span>
-                    <span className={`px-1.5 py-0.2 rounded text-[10px] uppercase font-bold shrink-0 ${
-                      log.status === "success" 
-                        ? "text-emerald-400 bg-emerald-500/10" 
-                        : log.status === "filtered"
-                        ? "text-amber-400 bg-amber-500/10"
-                        : "text-rose-400 bg-rose-500/10"
-                    }`}>
-                      {log.type}
+            {/* ================= CSV BATCH CRON PIPELINE & DEDUPLICATION CONSOLE ================= */}
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-6">
+              
+              {/* Header & Status Bar */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-zinc-800 pb-5">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="px-2.5 py-0.5 rounded-md text-xs font-semibold uppercase bg-zinc-800 text-zinc-300">
+                      Scheduled Crawler
                     </span>
-                    <span className="text-zinc-400 font-semibold shrink-0">[{log.source}]</span>
-                    <span className="text-zinc-200">{log.title}: <span className="text-zinc-500">{log.details}</span></span>
+                    <h3 className="text-lg sm:text-xl font-bold text-white flex items-center gap-2">
+                      <Clock className="w-5 h-5 text-red-500" />
+                      Batch Cron Indexer & Deduplication Engine
+                    </h3>
+                  </div>
+                  <p className="text-xs sm:text-sm text-zinc-400 mt-1 max-w-2xl">
+                    Import lists of 1,000+ movies via CSV. The crawler automatically normalizes titles, checks your Vault to skip duplicate qualities (or upgrade lower qualities), and crawls external bots in small, paced cron batches.
+                  </p>
+                </div>
+
+                {/* Primary Action Buttons - Stack on mobile, inline on desktop */}
+                <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                  <button
+                    onClick={() => setShowCsvModal(!showCsvModal)}
+                    className="flex-1 sm:flex-none px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-sm"
+                  >
+                    <UploadCloud className="w-4 h-4" />
+                    {showCsvModal ? "Hide Ingestion" : "+ Ingest CSV Movies"}
+                  </button>
+
+                  <button
+                    onClick={() => handleToggleCron(!cronStatus?.config?.isEnabled)}
+                    className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition flex items-center justify-center gap-2 ${
+                      cronStatus?.config?.isEnabled
+                        ? "bg-zinc-800 hover:bg-zinc-700 text-amber-400 border border-zinc-700"
+                        : "bg-zinc-100 hover:bg-white text-zinc-950 font-bold shadow-sm"
+                    }`}
+                  >
+                    {cronStatus?.config?.isEnabled ? <PauseCircle className="w-4 h-4" /> : <PlayCircle className="w-4 h-4 text-emerald-600" />}
+                    {cronStatus?.config?.isEnabled ? "Pause Cron" : "Start Cron Job"}
+                  </button>
+
+                  <button
+                    onClick={handleRunBatchNow}
+                    disabled={runningBatchNow}
+                    className="w-full sm:w-auto px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-50 border border-zinc-700"
+                    title="Process 1 batch of pending movies immediately"
+                  >
+                    <Zap className={`w-4 h-4 ${runningBatchNow ? "animate-spin text-red-500" : "text-red-500"}`} />
+                    {runningBatchNow ? "Running Batch..." : "Run Batch Now"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Notification Banner */}
+              {cronNotice && (
+                <div className={`p-3.5 rounded-xl text-xs sm:text-sm flex items-center justify-between animate-in fade-in duration-200 ${
+                  cronNotice.type === "success" 
+                    ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300" 
+                    : "bg-rose-500/10 border border-rose-500/20 text-rose-300"
+                }`}>
+                  <span className="flex items-center gap-2">
+                    {cronNotice.type === "success" ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-rose-400" />}
+                    {cronNotice.text}
+                  </span>
+                  <button onClick={() => setCronNotice(null)} className="text-xs underline ml-2">Dismiss</button>
+                </div>
+              )}
+
+              {/* Status & Progress KPIs - Responsive Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 sm:gap-3">
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Cron Status</span>
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <span className={`w-2.5 h-2.5 rounded-full ${cronStatus?.config?.isEnabled ? "bg-emerald-400 animate-pulse" : "bg-zinc-600"}`} />
+                    <span className="text-sm font-bold text-white">
+                      {cronStatus?.config?.isEnabled ? `Active (${cronStatus.config.intervalMinutes}m)` : "Paused"}
+                    </span>
+                  </div>
+                  <span className="text-xs text-zinc-500 mt-1 block">
+                    {cronStatus?.config?.nextRunAt ? `Next: ${new Date(cronStatus.config.nextRunAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : "Standby"}
+                  </span>
+                </div>
+
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Total Ingested</span>
+                  <p className="text-2xl font-bold text-white mt-1 tabular-nums">{cronStatus?.counts?.total || 0}</p>
+                  <span className="text-xs text-zinc-500 mt-1 block">Titles parsed</span>
+                </div>
+
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Pending Queue</span>
+                  <p className="text-2xl font-bold text-amber-400 mt-1 tabular-nums">{cronStatus?.counts?.pending || 0}</p>
+                  <span className="text-xs text-zinc-500 mt-1 block">Awaiting cron</span>
+                </div>
+
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Completed</span>
+                  <p className="text-2xl font-bold text-emerald-400 mt-1 tabular-nums">{cronStatus?.counts?.completed || 0}</p>
+                  <span className="text-xs text-zinc-500 mt-1 block">Added to Vault</span>
+                </div>
+
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Duplicates Filtered</span>
+                  <p className="text-2xl font-bold text-zinc-200 mt-1 tabular-nums">{cronStatus?.counts?.duplicate_skipped || 0}</p>
+                  <span className="text-xs text-zinc-500 mt-1 block">Saved crawl limits</span>
+                </div>
+
+                <div className="bg-zinc-950 border border-zinc-800 p-3.5 sm:p-4 rounded-xl">
+                  <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">Failed / Retrying</span>
+                  <p className="text-2xl font-bold text-rose-400 mt-1 tabular-nums">{cronStatus?.counts?.failed || 0}</p>
+                  <span className="text-xs text-zinc-500 mt-1 block">Max 3 retries</span>
+                </div>
+              </div>
+
+              {/* Ingestion & Settings Panel (Toggleable) */}
+              {showCsvModal && (
+                <div className="bg-zinc-950 border border-zinc-800 p-4 sm:p-6 rounded-2xl space-y-5 animate-in fade-in duration-200">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+                    <h4 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-red-500" />
+                      Ingest Movies CSV or Plain Text List
+                    </h4>
+                    <span className="text-xs text-zinc-400">
+                      Supports formats: <code className="text-zinc-200">Title, Quality, Year</code> or plain movie names per line
+                    </span>
+                  </div>
+
+                  <form onSubmit={handleUploadCsv} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="sm:col-span-2">
+                        <label className="block text-xs text-zinc-300 font-medium mb-1">CSV File Source Tag</label>
+                        <input
+                          type="text"
+                          value={csvSourceName}
+                          onChange={e => setCsvSourceName(e.target.value)}
+                          placeholder="e.g. movies_1000_batch_1.csv"
+                          className="w-full px-3.5 py-2.5 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-white outline-none focus:border-zinc-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-zinc-300 font-medium mb-1">Upload CSV File directly</label>
+                        <input
+                          type="file"
+                          accept=".csv,.txt"
+                          onChange={e => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              setCsvSourceName(file.name);
+                              const reader = new FileReader();
+                              reader.onload = ev => {
+                                if (ev.target?.result) {
+                                  setCsvInputText(String(ev.target.result));
+                                }
+                              };
+                              reader.readAsText(file);
+                            }
+                          }}
+                          className="w-full text-xs text-zinc-400 file:mr-2 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-zinc-800 file:text-white hover:file:bg-zinc-700"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-zinc-300 font-medium mb-1">
+                        Paste CSV Rows or Movie Titles (e.g. Inception 2010, Interstellar, Dune Part 2)
+                      </label>
+                      <textarea
+                        rows={6}
+                        value={csvInputText}
+                        onChange={e => setCsvInputText(e.target.value)}
+                        placeholder={`Inception, 1080p, 2010\nInterstellar [1080p] [YTS.MX]\nDune: Part Two (2024) 4K UHD\nThe Dark Knight\nOppenheimer (2023)`}
+                        className="w-full p-3.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm font-mono text-zinc-200 outline-none focus:border-zinc-500 leading-relaxed"
+                      />
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                      <span className="text-xs text-zinc-400">
+                        {csvInputText ? `${csvInputText.split(/\r?\n/).filter(l => l.trim()).length} lines detected` : "Paste movie titles or upload CSV file above"}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setCsvInputText(""); setCsvReport(null); }}
+                          className="px-3.5 py-2 text-xs sm:text-sm text-zinc-400 hover:text-white"
+                        >
+                          Clear Input
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={csvUploading || !csvInputText.trim()}
+                          className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center gap-2 disabled:opacity-50"
+                        >
+                          {csvUploading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                          {csvUploading ? "Deduplicating & Queuing..." : "Deduplicate & Queue Movies"}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+
+                  {/* Summary of Last Upload */}
+                  {csvReport && (
+                    <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-xl space-y-2 text-xs sm:text-sm">
+                      <div className="flex items-center justify-between font-semibold">
+                        <span className="text-white">Batch Parsing & Deduplication Summary</span>
+                        <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-4 h-4" /> Ready</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2.5 text-xs pt-1">
+                        <div className="bg-zinc-950 p-2.5 rounded-lg border border-zinc-800">
+                          <span className="text-zinc-500 block">Parsed:</span> <strong className="text-white text-base">{csvReport.totalParsed}</strong>
+                        </div>
+                        <div className="bg-zinc-950 p-2.5 rounded-lg border border-zinc-800">
+                          <span className="text-emerald-400 block">Queued:</span> <strong className="text-emerald-400 text-base">{csvReport.queued}</strong>
+                        </div>
+                        <div className="bg-zinc-950 p-2.5 rounded-lg border border-zinc-800">
+                          <span className="text-zinc-400 block">Duplicates Filtered:</span> <strong className="text-zinc-200 text-base">{csvReport.duplicatesSkipped}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Cron Scheduler Config Form */}
+                  <form onSubmit={handleSaveCronConfig} className="border-t border-zinc-800 pt-4 space-y-3">
+                    <h5 className="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                      <Sliders className="w-4 h-4 text-red-500" />
+                      Cron Scheduler Tuning & Pacing Settings
+                    </h5>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Batch Size (Per Run)</label>
+                        <select
+                          value={cronBatchSize}
+                          onChange={e => setCronBatchSize(e.target.value)}
+                          className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white outline-none focus:border-zinc-500"
+                        >
+                          <option value="3">3 movies</option>
+                          <option value="5">5 movies (Recommended)</option>
+                          <option value="10">10 movies</option>
+                          <option value="20">20 movies</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Frequency / Interval</label>
+                        <select
+                          value={cronIntervalMins}
+                          onChange={e => setCronIntervalMins(e.target.value)}
+                          className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white outline-none focus:border-zinc-500"
+                        >
+                          <option value="5">Every 5 minutes</option>
+                          <option value="15">Every 15 minutes (Balanced)</option>
+                          <option value="30">Every 30 minutes</option>
+                          <option value="60">Every 1 hour</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Pacing Delay Between Queries</label>
+                        <select
+                          value={cronDelayMs}
+                          onChange={e => setCronDelayMs(e.target.value)}
+                          className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white outline-none focus:border-zinc-500"
+                        >
+                          <option value="5000">5 seconds</option>
+                          <option value="7000">7 seconds (FloodSafe)</option>
+                          <option value="10000">10 seconds (Ultra Safe)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-zinc-300 mb-1 font-medium">Max Retries per Movie</label>
+                        <select
+                          value={cronMaxRetries}
+                          onChange={e => setCronMaxRetries(e.target.value)}
+                          className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white outline-none focus:border-zinc-500"
+                        >
+                          <option value="1">1 try</option>
+                          <option value="2">2 tries</option>
+                          <option value="3">3 tries (Recommended)</option>
+                          <option value="5">5 tries</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="submit"
+                        className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white text-xs sm:text-sm font-semibold rounded-xl transition border border-zinc-700"
+                      >
+                        Save Scheduler Settings
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Batch Queue Table & Filter Toolbar */}
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 sm:pb-0">
+                    <span className="text-xs text-zinc-400 font-semibold mr-1 flex items-center gap-1 shrink-0">
+                      <ListFilter className="w-3.5 h-3.5" /> Filter:
+                    </span>
+                    {[
+                      { id: "all", label: "All Items" },
+                      { id: "pending", label: "Pending" },
+                      { id: "completed", label: "Completed" },
+                      { id: "duplicate_skipped", label: "Duplicates Filtered" },
+                      { id: "failed", label: "Failed" }
+                    ].map(tab => (
+                      <button
+                        key={tab.id}
+                        onClick={() => { setCronFilter(tab.id); }}
+                        className={`px-3 py-1.5 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition ${
+                          cronFilter === tab.id
+                            ? "bg-zinc-100 text-zinc-950 font-bold"
+                            : "bg-zinc-950 text-zinc-400 hover:text-white border border-zinc-800"
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-3 text-xs sm:text-sm justify-end">
+                    <button
+                      onClick={() => handleClearQueue("completed")}
+                      className="text-zinc-400 hover:text-white transition"
+                      title="Remove finished and duplicate entries from the list"
+                    >
+                      Clear Completed
+                    </button>
+                    <span className="text-zinc-700">•</span>
+                    <button
+                      onClick={() => handleClearQueue("all")}
+                      className="text-rose-400 hover:text-rose-300 transition"
+                    >
+                      Clear All Queue
+                    </button>
+                  </div>
+                </div>
+
+                {/* Mobile View: High-contrast Card List (Nothing cut off on phones) */}
+                <div className="block md:hidden space-y-3">
+                  {cronQueue.map((item: any) => (
+                    <div key={item.id} className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="space-y-0.5 flex-1 min-w-0">
+                          <h5 className="font-bold text-white text-sm break-words">{item.clean_title}</h5>
+                          {item.raw_title !== item.clean_title && (
+                            <p className="text-xs text-zinc-500 font-mono break-all">{item.raw_title}</p>
+                          )}
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 border border-zinc-800 text-zinc-300 uppercase shrink-0">
+                          {item.requested_quality || "1080p"}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-900 text-xs">
+                        <span className={`px-2 py-0.5 rounded-md font-semibold uppercase inline-flex items-center gap-1 ${
+                          item.status === "completed"
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                            : item.status === "processing"
+                            ? "bg-zinc-800 text-white animate-pulse"
+                            : item.status === "duplicate_skipped"
+                            ? "bg-zinc-800 text-zinc-400"
+                            : item.status === "failed"
+                            ? "bg-rose-500/10 text-rose-400 border border-rose-500/30"
+                            : "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                        }`}>
+                          {item.status === "completed" && <CheckCircle2 className="w-3 h-3" />}
+                          {item.status === "failed" && <AlertTriangle className="w-3 h-3" />}
+                          {item.status.replace("_", " ")}
+                        </span>
+
+                        <span className="text-zinc-400 font-mono">
+                          Attempts: {item.attempts || 0} / {cronStatus?.config?.maxRetries || 3}
+                        </span>
+                      </div>
+
+                      {(item.bot_used || item.last_error) && (
+                        <div className="text-xs pt-1 border-t border-zinc-900">
+                          {item.bot_used ? (
+                            <span className="text-emerald-400 font-mono">Indexed via {item.bot_used}</span>
+                          ) : (
+                            <span className="text-rose-400 font-mono break-words">{item.last_error}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {cronQueue.length === 0 && (
+                    <div className="p-8 text-center text-zinc-500 text-sm border border-zinc-800 rounded-xl bg-zinc-950">
+                      Queue is currently empty. Click "+ Ingest CSV Movies" above to queue movies.
+                    </div>
+                  )}
+                </div>
+
+                {/* Desktop View: Full Table */}
+                <div className="hidden md:block bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-zinc-900 text-zinc-400 text-xs uppercase font-semibold border-b border-zinc-800 sticky top-0">
+                        <tr>
+                          <th className="p-3.5">Movie Title (Cleaned)</th>
+                          <th className="p-3.5">Quality</th>
+                          <th className="p-3.5">Status</th>
+                          <th className="p-3.5">Bot Used / Details</th>
+                          <th className="p-3.5">Attempts</th>
+                          <th className="p-3.5">Source CSV</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-900">
+                        {cronQueue.map((item: any) => (
+                          <tr key={item.id} className="hover:bg-zinc-900/40 transition">
+                            <td className="p-3.5">
+                              <span className="font-semibold text-white block">{item.clean_title}</span>
+                              {item.raw_title !== item.clean_title && (
+                                <span className="text-xs text-zinc-500 font-mono truncate block max-w-xs">{item.raw_title}</span>
+                              )}
+                            </td>
+                            <td className="p-3.5">
+                              <span className="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 border border-zinc-800 text-zinc-300 uppercase">
+                                {item.requested_quality || "1080p"}
+                              </span>
+                            </td>
+                            <td className="p-3.5">
+                              <span className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase inline-flex items-center gap-1 ${
+                                item.status === "completed"
+                                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                  : item.status === "processing"
+                                  ? "bg-zinc-800 text-white animate-pulse"
+                                  : item.status === "duplicate_skipped"
+                                  ? "bg-zinc-800 text-zinc-400"
+                                  : item.status === "failed"
+                                  ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                                  : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                              }`}>
+                                {item.status === "completed" && <CheckCircle2 className="w-3 h-3" />}
+                                {item.status === "failed" && <AlertTriangle className="w-3 h-3" />}
+                                {item.status.replace("_", " ")}
+                              </span>
+                            </td>
+                            <td className="p-3.5 text-zinc-300">
+                              {item.bot_used ? (
+                                <span className="text-emerald-400 font-mono text-xs">Indexed via {item.bot_used}</span>
+                              ) : item.last_error ? (
+                                <span className="text-zinc-400 text-xs truncate block max-w-xs" title={item.last_error}>
+                                  {item.last_error}
+                                </span>
+                              ) : (
+                                <span className="text-zinc-500 text-xs">Pending crawl</span>
+                              )}
+                            </td>
+                            <td className="p-3.5 text-zinc-400 font-mono text-xs">
+                              {item.attempts || 0} / {cronStatus?.config?.maxRetries || 3}
+                            </td>
+                            <td className="p-3.5 text-zinc-500 text-xs font-mono">
+                              {item.source_csv || "batch_upload.csv"}
+                            </td>
+                          </tr>
+                        ))}
+                        {cronQueue.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="p-8 text-center text-zinc-500 text-sm">
+                              Queue is currently empty. Click "+ Ingest CSV Movies" above to queue movies.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+            <div className="bg-zinc-900 border border-zinc-800 p-4 sm:p-6 rounded-2xl space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-emerald-400" /> Real-Time Crawler & Execution Feed
+                </h3>
+                <span className="text-xs text-zinc-500 font-mono">Auto-refreshes every 10s</span>
+              </div>
+              <div className="bg-zinc-950 p-3.5 sm:p-4 rounded-xl border border-zinc-800 font-mono text-xs sm:text-sm space-y-2 max-h-64 overflow-y-auto">
+                {logs.map(log => (
+                  <div key={log.id} className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-3 border-b border-zinc-900 pb-2 last:border-0">
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-zinc-500 text-xs">{log.timestamp}</span>
+                      <span className={`px-1.5 py-0.5 rounded text-xs uppercase font-bold ${
+                        log.status === "success" 
+                          ? "text-emerald-400 bg-emerald-500/10" 
+                          : log.status === "filtered"
+                          ? "text-zinc-300 bg-zinc-800"
+                          : "text-rose-400 bg-rose-500/10"
+                      }`}>
+                        {log.type}
+                      </span>
+                      <span className="text-zinc-400 font-semibold">[{log.source}]</span>
+                    </div>
+                    <span className="text-zinc-200">{log.title}: <span className="text-zinc-400">{log.details}</span></span>
                   </div>
                 ))}
-                {logs.length === 0 && <div className="text-zinc-600">No crawler events logged yet.</div>}
+                {logs.length === 0 && <div className="text-zinc-500">No crawler events logged yet.</div>}
               </div>
             </div>
 
@@ -1592,47 +2535,46 @@ export default function AdminDashboard() {
         {/* ================= USER REQUESTS TAB ================= */}
         {activeTab === "requests" && (
           <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h2 className="text-xl font-bold text-zinc-100 flex items-center gap-2">
-                  <Bell className="w-5 h-5 text-rose-500" /> Pending User Requests
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <Bell className="w-5 h-5 text-red-500" /> Pending User Requests
                 </h2>
-                <p className="text-xs text-zinc-500 mt-1">Requests can be fulfilled manually or automatically fetched via external bots.</p>
+                <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">Requests can be fulfilled manually or automatically fetched via external bots.</p>
               </div>
-              <span className="text-xs font-semibold px-3 py-1 bg-rose-500/10 text-rose-400 border border-rose-500/20 rounded-full">
+              <span className="text-xs font-semibold px-3 py-1 bg-zinc-800 text-zinc-200 border border-zinc-700 rounded-full w-fit">
                 {pendingRequests.length} Waiting
               </span>
             </div>
 
             {autoFetchNotice && (
-              <div className="p-4 bg-purple-500/10 border border-purple-500/20 text-purple-300 rounded-xl text-xs flex items-center justify-between">
+              <div className="p-4 bg-zinc-900 border border-zinc-800 text-zinc-200 rounded-xl text-xs sm:text-sm flex items-center justify-between">
                 <span>{autoFetchNotice}</span>
-                <button onClick={() => setAutoFetchNotice(null)} className="text-xs hover:underline">Dismiss</button>
+                <button onClick={() => setAutoFetchNotice(null)} className="text-xs underline ml-2">Dismiss</button>
               </div>
             )}
 
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
               {pendingRequests.length > 0 ? (
-                <div className="divide-y divide-zinc-800/50">
+                <div className="divide-y divide-zinc-800">
                   {pendingRequests.map(req => (
-                    <div key={req.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-900/60 transition">
-                      <div>
-                        <h4 className="text-sm font-bold text-zinc-100">{req.title}</h4>
-                        <p className="text-xs text-zinc-500 mt-1">Requested by user: <span className="font-mono text-zinc-400">{req.telegram_id}</span></p>
+                    <div key={req.id} className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-zinc-850 transition">
+                      <div className="space-y-0.5">
+                        <h4 className="text-sm sm:text-base font-bold text-white">{req.title}</h4>
+                        <p className="text-xs text-zinc-400">Requested by Telegram user: <span className="font-mono text-zinc-300">{req.telegram_id}</span></p>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {/* 1-Click Auto-Fetch via Search Bots */}
+                      <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
                         <button
                           onClick={() => handleAutoFetchRequest(req.id)}
                           disabled={autoFetchingId === req.id}
-                          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-purple-500/20 disabled:opacity-50"
+                          className="flex-1 sm:flex-none px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs sm:text-sm font-semibold transition flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
                         >
-                          <Zap className="w-3.5 h-3.5 text-amber-300" />
+                          <Zap className="w-3.5 h-3.5" />
                           {autoFetchingId === req.id ? "Fetching via Bots..." : "Auto-Fetch via Bots"}
                         </button>
                         <button 
                           onClick={() => handleFulfillRequest(req.id)}
-                          className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-semibold transition"
+                          className="flex-1 sm:flex-none px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-xl text-xs sm:text-sm font-semibold transition"
                         >
                           Mark Ready & Notify
                         </button>
@@ -1645,26 +2587,28 @@ export default function AdminDashboard() {
               )}
             </div>
 
-            <h2 className="text-xl font-bold text-zinc-100 mt-10">Request History</h2>
-            <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-2xl overflow-hidden">
-               <table className="w-full text-left text-sm text-zinc-400">
-                 <thead className="bg-zinc-900/80 text-xs uppercase font-semibold text-zinc-500">
-                   <tr><th className="px-5 py-4">Title</th><th className="px-5 py-4">User</th><th className="px-5 py-4">Status</th></tr>
-                 </thead>
-                 <tbody className="divide-y divide-zinc-800/50">
-                   {allRequests.slice(0, 15).map(req => (
-                     <tr key={req.id} className="hover:bg-zinc-900/60">
-                       <td className="px-5 py-4 font-medium text-zinc-300">{req.title}</td>
-                       <td className="px-5 py-4 font-mono text-xs text-zinc-500">{req.telegram_id}</td>
-                       <td className="px-5 py-4">
-                         <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${req.status === 'pending' ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
-                           {req.status}
-                         </span>
-                       </td>
-                     </tr>
-                   ))}
-                 </tbody>
-               </table>
+            <h2 className="text-lg sm:text-xl font-bold text-white mt-8">Request History</h2>
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+               <div className="overflow-x-auto">
+                 <table className="w-full text-left text-xs sm:text-sm text-zinc-300">
+                   <thead className="bg-zinc-950 text-xs uppercase font-semibold text-zinc-400 border-b border-zinc-800">
+                     <tr><th className="px-4 sm:px-5 py-3.5">Title</th><th className="px-4 sm:px-5 py-3.5">User</th><th className="px-4 sm:px-5 py-3.5">Status</th></tr>
+                   </thead>
+                   <tbody className="divide-y divide-zinc-800">
+                     {allRequests.slice(0, 15).map(req => (
+                       <tr key={req.id} className="hover:bg-zinc-850">
+                         <td className="px-4 sm:px-5 py-3.5 font-medium text-white">{req.title}</td>
+                         <td className="px-4 sm:px-5 py-3.5 font-mono text-xs text-zinc-400">{req.telegram_id}</td>
+                         <td className="px-4 sm:px-5 py-3.5">
+                           <span className={`px-2 py-0.5 rounded text-xs font-semibold uppercase ${req.status === 'pending' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'}`}>
+                             {req.status}
+                           </span>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
             </div>
           </div>
         )}
@@ -1674,20 +2618,20 @@ export default function AdminDashboard() {
           <div className="space-y-6 animate-in fade-in duration-300">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
-                <h2 className="text-xl font-bold text-zinc-100 flex items-center gap-2">
-                  <HardDrive className="w-5 h-5 text-purple-500" /> Vault Inventory
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <HardDrive className="w-5 h-5 text-red-500" /> Vault Inventory
                 </h2>
-                <p className="text-xs text-zinc-500 mt-1">{libraryFiles.length} media files stored in private vault channel and Firestore.</p>
+                <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">{libraryFiles.length} media files archived in private vault channel and Firestore.</p>
               </div>
               <div className="flex items-center gap-3">
-                <div className="relative">
+                <div className="relative flex-1 sm:flex-none">
                   <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={librarySearch}
                     onChange={(e) => setLibrarySearch(e.target.value)}
                     placeholder="Search vault movies..."
-                    className="pl-9 pr-4 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-purple-500 w-48 sm:w-64 transition"
+                    className="pl-9 pr-7 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500 w-full sm:w-64 transition"
                   />
                   {librarySearch && (
                     <button
@@ -1700,7 +2644,7 @@ export default function AdminDashboard() {
                 </div>
                 <button 
                   onClick={() => window.open("/api/library/export", "_blank")}
-                  className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 rounded-lg text-xs font-semibold transition flex items-center gap-2"
+                  className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 rounded-xl text-xs sm:text-sm font-semibold transition flex items-center gap-2 shrink-0"
                 >
                   <DownloadCloud className="w-4 h-4" /> Export Backup
                 </button>
@@ -1723,32 +2667,32 @@ export default function AdminDashboard() {
                 <>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     {filtered.map(file => (
-                      <div key={file.id} className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl overflow-hidden group hover:border-zinc-700 transition">
-                        <div className="h-40 bg-zinc-800 relative">
+                      <div key={file.id} className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden group hover:border-zinc-700 transition">
+                        <div className="h-44 bg-zinc-800 relative">
                           {file.poster_url && (
                              <img src={file.poster_url.startsWith("http") ? file.poster_url : `https://image.tmdb.org/t/p/w500${file.poster_url}`} alt={file.movie_title} className="absolute inset-0 w-full h-full object-cover" />
                           )}
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/90 to-transparent" />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
                           <div className="absolute bottom-3 left-3 right-3 text-white">
-                            <p className="font-bold text-sm leading-tight line-clamp-1">{file.movie_title}</p>
-                            <p className="text-xs text-zinc-400 font-medium">
+                            <p className="font-bold text-sm sm:text-base leading-tight line-clamp-1">{file.movie_title}</p>
+                            <p className="text-xs text-zinc-300 font-medium mt-0.5">
                               {file.season && file.episode ? `S${file.season}E${file.episode} • ` : ""}
                               {file.year ? `${file.year} • ` : ""}
-                              {file.quality || "HD"}
+                              <span className="uppercase">{file.quality || "HD"}</span>
                             </p>
                           </div>
                         </div>
-                        <div className="p-3 bg-zinc-950 flex items-center justify-between">
-                           <span className="text-[10px] text-zinc-500 font-mono truncate max-w-[140px]" title={file.file_name || file.telegram_file_id}>
+                        <div className="p-3 bg-zinc-950 flex items-center justify-between text-xs">
+                           <span className="text-zinc-500 font-mono truncate max-w-[140px]" title={file.file_name || file.telegram_file_id}>
                              {file.file_name || `${file.telegram_file_id.substring(0, 15)}...`}
                            </span>
-                           <span className="text-xs font-semibold text-zinc-400">{formatBytes(file.file_size)}</span>
+                           <span className="font-semibold text-zinc-400">{formatBytes(file.file_size)}</span>
                         </div>
                       </div>
                     ))}
                   </div>
                   {filtered.length === 0 && (
-                    <div className="p-12 text-center text-zinc-500 text-sm bg-zinc-900/40 rounded-2xl border border-zinc-800/60">
+                    <div className="p-12 text-center text-zinc-500 text-sm bg-zinc-900 rounded-2xl border border-zinc-800">
                       {libraryFiles.length === 0 ? "No files indexed yet." : `No movies matching "${librarySearch}".`}
                     </div>
                   )}
@@ -1761,25 +2705,27 @@ export default function AdminDashboard() {
         {/* ================= COMMUNICATIONS TAB ================= */}
         {activeTab === "comms" && (
           <div className="space-y-6 animate-in fade-in duration-300">
-            <h2 className="text-xl font-bold text-zinc-100 flex items-center gap-2">
-              <Megaphone className="w-5 h-5 text-blue-500" /> Global Messaging & Engagement
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+              <Megaphone className="w-5 h-5 text-red-500" /> Telegram Messaging & Engagement
             </h2>
             
-            <div className="bg-zinc-900/40 border border-zinc-800/60 p-8 rounded-3xl">
-               <h3 className="text-sm font-semibold text-zinc-300 mb-2">Broadcast Announcement</h3>
-               <p className="text-xs text-zinc-500 mb-4">Send a message to all users active on the Telegram bot.</p>
+            <div className="bg-zinc-900 border border-zinc-800 p-6 sm:p-8 rounded-2xl space-y-4">
+               <div>
+                 <h3 className="text-base font-semibold text-white">Broadcast Announcement</h3>
+                 <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">Send a message to all users active on the Telegram bot.</p>
+               </div>
                <textarea
                  value={broadcastMsg}
                  onChange={e => setBroadcastMsg(e.target.value)}
                  placeholder="Hello everyone, we just uploaded..."
-                 className="w-full h-32 bg-zinc-950 border border-zinc-800/80 rounded-xl p-4 text-sm outline-none focus:border-blue-500 transition mb-4 resize-none"
+                 className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-sm text-white outline-none focus:border-zinc-500 transition resize-none"
                />
                <div className="flex items-center justify-between">
                  {broadcastStatus ? <span className="text-xs font-medium text-emerald-400">{broadcastStatus}</span> : <div/>}
                  <button
                    onClick={handleSendBroadcast}
                    disabled={broadcastSending || !broadcastMsg.trim()}
-                   className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-semibold shadow-lg shadow-blue-500/20 transition disabled:opacity-50"
+                   className="px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-semibold transition disabled:opacity-50"
                  >
                    {broadcastSending ? "Sending..." : "Send Global Broadcast"}
                  </button>

@@ -143,14 +143,17 @@ async function searchTVmaze(query: string): Promise<UnifiedMovie[]> {
   }
 }
 
+let isOmdbKeyDisabled = false;
+
 /**
- * Search using OMDb API if user provided OMDB_API_KEY
+ * Search using OMDb API if user provided valid OMDB_API_KEY
  */
 async function searchOMDb(query: string, apiKey: string): Promise<UnifiedMovie[]> {
+  if (isOmdbKeyDisabled) return [];
   try {
     const res = await axios.get("https://www.omdbapi.com/", {
       params: { apikey: apiKey, s: query },
-      timeout: 4000,
+      timeout: 3000,
     });
 
     if (res.data?.Response === "False" || !res.data?.Search) {
@@ -165,7 +168,7 @@ async function searchOMDb(query: string, apiKey: string): Promise<UnifiedMovie[]
         try {
           const detailRes = await axios.get("https://www.omdbapi.com/", {
             params: { apikey: apiKey, i: item.imdbID, plot: "short" },
-            timeout: 2500,
+            timeout: 2000,
           });
           if (detailRes.data?.Plot && detailRes.data.Plot !== "N/A") {
             plot = detailRes.data.Plot;
@@ -187,7 +190,9 @@ async function searchOMDb(query: string, apiKey: string): Promise<UnifiedMovie[]
       })
     );
   } catch (error: any) {
-    console.warn("OMDb error:", error.message);
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      isOmdbKeyDisabled = true;
+    }
     return [];
   }
 }

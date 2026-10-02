@@ -72,9 +72,10 @@ const DEFAULT_TARGET_CHANNELS = [
 
 const DEFAULT_SEARCH_BOTS = [
   { username: "@Apple_moviebot", type: "command" as const, command: "/search {query}", priority: 1 },
-  { username: "@cinemagic_hd_bot", type: "command" as const, command: "/search {query}", priority: 1 },
-  { username: "@TGMovieSearchBot", type: "inline" as const, command: "/search {query}", priority: 2 },
-  { username: "@FilesSearchMasterBot", type: "command" as const, command: "/find {query}", priority: 3 }
+  { username: "@iPapkornEzPzBot", type: "command" as const, command: "/search {query}", priority: 2 },
+  { username: "@iPapkornDeltaBot", type: "command" as const, command: "/search {query}", priority: 3 },
+  { username: "@TGMovieSearchBot", type: "inline" as const, command: "/search {query}", priority: 4 },
+  { username: "@FilesSearchMasterBot", type: "command" as const, command: "/find {query}", priority: 5 }
 ];
 
 export async function initCrawlerService() {
@@ -152,20 +153,26 @@ export async function initCrawlerService() {
       targets = targetRows as unknown as CrawlerTarget[];
     }
 
-    // Load search bots
-    const botRows = (await db.execute("SELECT * FROM search_bots ORDER BY priority ASC")).rows;
-    if (botRows.length === 0) {
-      for (const b of DEFAULT_SEARCH_BOTS) {
+    // Auto-migrate & ensure default priority bots exist
+    for (const b of DEFAULT_SEARCH_BOTS) {
+      const existing = (await db.execute({
+        sql: "SELECT id FROM search_bots WHERE LOWER(bot_username) = LOWER(?)",
+        args: [b.username]
+      })).rows;
+      if (existing.length === 0) {
         await db.execute({
           sql: "INSERT INTO search_bots (bot_username, bot_type, command_template, status, priority) VALUES (?, ?, ?, 'active', ?)",
           args: [b.username, b.type, b.command, b.priority]
         });
       }
-      const reloadedBots = (await db.execute("SELECT * FROM search_bots ORDER BY priority ASC")).rows;
-      searchBots = reloadedBots as unknown as SearchBot[];
-    } else {
-      searchBots = botRows as unknown as SearchBot[];
     }
+
+    // Demote @cinemagic_hd_bot if exists to priority 6 or inactive
+    await db.execute("UPDATE search_bots SET priority = 6, status = 'inactive' WHERE LOWER(bot_username) = '@cinemagic_hd_bot'");
+
+    // Reload search bots
+    const botRows = (await db.execute("SELECT * FROM search_bots ORDER BY priority ASC, id ASC")).rows;
+    searchBots = botRows as unknown as SearchBot[];
 
     // Load recent search jobs
     const jobRows = (await db.execute("SELECT * FROM search_jobs ORDER BY created_at DESC LIMIT 50")).rows;
@@ -642,6 +649,41 @@ export async function addSearchBot(bot: {
 
 export async function deleteSearchBot(id: number): Promise<boolean> {
   await db.execute({ sql: "DELETE FROM search_bots WHERE id = ?", args: [id] });
+  return true;
+}
+
+export async function updateSearchBot(id: number, updates: Partial<SearchBot>): Promise<boolean> {
+  const fields: string[] = [];
+  const args: any[] = [];
+
+  if (updates.bot_username !== undefined) {
+    fields.push("bot_username = ?");
+    args.push(updates.bot_username.trim());
+  }
+  if (updates.bot_type !== undefined) {
+    fields.push("bot_type = ?");
+    args.push(updates.bot_type);
+  }
+  if (updates.command_template !== undefined) {
+    fields.push("command_template = ?");
+    args.push(updates.command_template);
+  }
+  if (updates.status !== undefined) {
+    fields.push("status = ?");
+    args.push(updates.status);
+  }
+  if (updates.priority !== undefined) {
+    fields.push("priority = ?");
+    args.push(updates.priority);
+  }
+
+  if (fields.length === 0) return false;
+  args.push(id);
+
+  await db.execute({
+    sql: `UPDATE search_bots SET ${fields.join(", ")} WHERE id = ?`,
+    args
+  });
   return true;
 }
 
@@ -1267,3 +1309,579 @@ export async function dispatchAutomatedSearch(query: string, userTelegramId?: st
     return { success: false, jobId, title: cleanTitle, message: err.message };
   }
 }
+
+// =========================================================================
+// CSV BATCH CRON INDEXER & DEDUPLICATION ENGINE
+// =========================================================================
+
+export interface BatchQueueItem {
+  id: number;
+  raw_title: string;
+  clean_title: string;
+  year?: string;
+  requested_quality: string;
+  status: "pending" | "processing" | "completed" | "duplicate_skipped" | "not_found" | "failed";
+  attempts: number;
+  last_error?: string;
+  bot_used?: string;
+  media_file_id?: number;
+  source_csv?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CronConfig {
+  isEnabled: boolean;
+  batchSize: number; // e.g. 5 items per run
+  intervalMinutes: number; // e.g. every 15, 30, or 60 mins
+  delayBetweenItemsMs: number; // e.g. 6000ms
+  maxRetries: number;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  isRunningBatch: boolean;
+}
+
+let cronConfig: CronConfig = {
+  isEnabled: false,
+  batchSize: 5,
+  intervalMinutes: 15,
+  delayBetweenItemsMs: 7000,
+  maxRetries: 3,
+  lastRunAt: null,
+  nextRunAt: null,
+  isRunningBatch: false
+};
+
+let cronTimerHandle: NodeJS.Timeout | null = null;
+
+/**
+ * Clean & normalize messy movie release titles, stripping promos, channel tags,
+ * release groups, resolutions, and video extensions.
+ */
+export function cleanMovieReleaseTitle(rawInput: string): {
+  cleanTitle: string;
+  year?: string;
+  quality?: string;
+  season?: number;
+  episode?: number;
+} {
+  let text = (rawInput || "").trim();
+  if (!text) return { cleanTitle: "" };
+
+  // Remove common URL prefixes and file extensions
+  text = text.replace(/\.(mkv|mp4|avi|mov|webm|flv|ts)$/i, "");
+  text = text.replace(/https?:\/\/\S+/gi, "");
+
+  // Remove channel handles and promotional tags
+  text = text.replace(/@\w+/g, "");
+  text = text.replace(/\[(?:YTS(?:\.MX)?|Pahe(?:\.in)?|Apple_Movies\w*|F5_FILMS|RARBG|TGx|PSA|GalaxyTV|EZTV|TorrentGalaxy)\]/gi, "");
+  text = text.replace(/(?:Join\s*@|Follow\s*@|Telegram\s*@|Downloaded\s*from\s*|Shared\s*by\s*)[^\s]+/gi, "");
+
+  // Extract Season & Episode if series
+  let season: number | undefined;
+  let episode: number | undefined;
+  const sMatch = text.match(/[Ss](\d{1,2})[Ee](\d{1,3})/i) || text.match(/Season\s*(\d{1,2})/i);
+  if (sMatch) {
+    season = parseInt(sMatch[1], 10);
+    const epMatch = text.match(/[Ee](\d{1,3})/i) || text.match(/Episode\s*(\d{1,3})/i);
+    if (epMatch) episode = parseInt(epMatch[1], 10);
+  }
+
+  // Extract Year (1900 - 2099)
+  let year: string | undefined;
+  const yearMatch = text.match(/\b(19\d{2}|20\d{2})\b/);
+  if (yearMatch) {
+    year = yearMatch[1];
+  }
+
+  // Extract Quality
+  let quality: string | undefined;
+  if (/2160p|4k|uhd/i.test(text)) quality = "4K";
+  else if (/1080p/i.test(text)) quality = "1080p";
+  else if (/720p/i.test(text)) quality = "720p";
+  else if (/480p/i.test(text)) quality = "480p";
+  else quality = "1080p";
+
+  // Strip technical release descriptors
+  text = text.replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdrip|web-dl|webrip|bluray|brrip|dvdrip|hdtv|x264|x265|hevc|aac|ac3|dts|ddp5\.1|10bit|remux|extended|unrated|directors\.cut|repack)\b/gi, " ");
+  
+  // Strip punctuation artifacts (brackets, dots, underscores, hyphens)
+  text = text.replace(/[\[\]\(\)\{\}_.-]/g, " ");
+  
+  // If year was found, truncate any text trailing after year
+  if (year) {
+    const yearIdx = text.indexOf(year);
+    if (yearIdx > 0) {
+      text = text.substring(0, yearIdx);
+    }
+  }
+
+  // Remove duplicate spaces
+  text = text.replace(/\s+/g, " ").trim();
+
+  return {
+    cleanTitle: text || rawInput.trim(),
+    year,
+    quality,
+    season,
+    episode
+  };
+}
+
+/**
+ * Check if a movie is already present in the Vault with the given quality.
+ * Returns { exists: boolean, reason?: string, existingQualities: string[] }
+ */
+export async function checkVaultDuplicate(cleanTitle: string, requestedQuality: string = "any"): Promise<{
+  isDuplicate: boolean;
+  reason?: string;
+  existingQualities: string[];
+}> {
+  if (!cleanTitle) return { isDuplicate: false, existingQualities: [] };
+
+  try {
+    const rows = (await db.execute({
+      sql: `SELECT id, movie_title, quality, file_size FROM media_files WHERE LOWER(movie_title) = LOWER(?) OR LOWER(movie_title) LIKE LOWER(?)`,
+      args: [cleanTitle, `%${cleanTitle}%`]
+    })).rows;
+
+    if (rows.length === 0) {
+      return { isDuplicate: false, existingQualities: [] };
+    }
+
+    const existingQualities = Array.from(new Set(rows.map((r: any) => (r.quality || "Unknown").toUpperCase())));
+    const reqQ = requestedQuality.toUpperCase();
+
+    // If requested quality is "any" or "best" and we already have 1080p or 4K in vault
+    if ((reqQ === "ANY" || reqQ === "BEST") && (existingQualities.includes("1080P") || existingQualities.includes("4K"))) {
+      return {
+        isDuplicate: true,
+        reason: `Already in Vault in high quality (${existingQualities.join(", ")})`,
+        existingQualities
+      };
+    }
+
+    // If exact quality match exists
+    if (existingQualities.includes(reqQ)) {
+      return {
+        isDuplicate: true,
+        reason: `Already in Vault with exact ${reqQ} quality`,
+        existingQualities
+      };
+    }
+
+    // If vault has lower quality (e.g. 720p) and new item is 1080p/4K, allow crawl for upgrade!
+    if (reqQ === "1080P" || reqQ === "4K") {
+      return {
+        isDuplicate: false,
+        reason: `Vault has ${existingQualities.join(", ")}; proceeding with upgrade to ${reqQ}`,
+        existingQualities
+      };
+    }
+
+    return {
+      isDuplicate: true,
+      reason: `Already present in Vault (${existingQualities.join(", ")})`,
+      existingQualities
+    };
+  } catch (err: any) {
+    console.warn("[Deduplication] Check error:", err.message);
+    return { isDuplicate: false, existingQualities: [] };
+  }
+}
+
+/**
+ * Ingest CSV text or title list into the crawler_batch_queue with automated deduplication
+ */
+export async function parseAndQueueCsvMovies(csvContent: string, sourceName: string = "batch_upload.csv"): Promise<{
+  totalParsed: number;
+  queued: number;
+  duplicatesSkipped: number;
+  items: Array<{ title: string; cleanTitle: string; status: string; reason?: string }>;
+}> {
+  // Ensure table exists
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS crawler_batch_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_title TEXT NOT NULL,
+      clean_title TEXT NOT NULL,
+      year TEXT,
+      requested_quality TEXT DEFAULT '1080p',
+      status TEXT DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      last_error TEXT,
+      bot_used TEXT,
+      media_file_id INTEGER,
+      source_csv TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const lines = csvContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  let totalParsed = 0;
+  let queued = 0;
+  let duplicatesSkipped = 0;
+  const processedItems: Array<{ title: string; cleanTitle: string; status: string; reason?: string }> = [];
+
+  for (const rawLine of lines) {
+    // Check if line is CSV header
+    if (/^(title|name|movie|film|movie_title|filename)/i.test(rawLine) && lines.indexOf(rawLine) === 0) {
+      continue;
+    }
+
+    // Extract title from CSV comma separated line
+    const columns = rawLine.split(",").map(c => c.replace(/^["']|["']$/g, "").trim());
+    const rawTitle = columns[0];
+    if (!rawTitle || rawTitle.length < 2) continue;
+
+    totalParsed++;
+    const parsed = cleanMovieReleaseTitle(rawTitle);
+    const targetQuality = columns[1] && /(4k|1080p|720p|480p)/i.test(columns[1]) ? columns[1] : (parsed.quality || "1080p");
+    const targetYear = columns[2] && /^\d{4}$/.test(columns[2]) ? columns[2] : parsed.year;
+
+    // Check if already in current pending queue
+    const inQueue = (await db.execute({
+      sql: "SELECT id FROM crawler_batch_queue WHERE LOWER(clean_title) = LOWER(?) AND status IN ('pending', 'processing', 'completed')",
+      args: [parsed.cleanTitle]
+    })).rows;
+
+    if (inQueue.length > 0) {
+      duplicatesSkipped++;
+      processedItems.push({
+        title: rawTitle,
+        cleanTitle: parsed.cleanTitle,
+        status: "duplicate_skipped",
+        reason: "Already in batch queue"
+      });
+      continue;
+    }
+
+    // Check Vault duplication
+    const dupCheck = await checkVaultDuplicate(parsed.cleanTitle, targetQuality);
+    if (dupCheck.isDuplicate) {
+      duplicatesSkipped++;
+      await db.execute({
+        sql: `INSERT INTO crawler_batch_queue (raw_title, clean_title, year, requested_quality, status, last_error, source_csv) 
+              VALUES (?, ?, ?, ?, 'duplicate_skipped', ?, ?)`,
+        args: [rawTitle, parsed.cleanTitle, targetYear || null, targetQuality, dupCheck.reason || "Duplicate in Vault", sourceName]
+      });
+      processedItems.push({
+        title: rawTitle,
+        cleanTitle: parsed.cleanTitle,
+        status: "duplicate_skipped",
+        reason: dupCheck.reason
+      });
+    } else {
+      queued++;
+      await db.execute({
+        sql: `INSERT INTO crawler_batch_queue (raw_title, clean_title, year, requested_quality, status, source_csv) 
+              VALUES (?, ?, ?, ?, 'pending', ?)`,
+        args: [rawTitle, parsed.cleanTitle, targetYear || null, targetQuality, sourceName]
+      });
+      processedItems.push({
+        title: rawTitle,
+        cleanTitle: parsed.cleanTitle,
+        status: "pending",
+        reason: dupCheck.reason || "Queued for cron crawl"
+      });
+    }
+  }
+
+  logActivity({
+    type: "channel_crawl",
+    source: sourceName,
+    title: `CSV Batch Ingested: ${queued} queued, ${duplicatesSkipped} duplicates filtered`,
+    details: `Total parsed: ${totalParsed} titles from ${sourceName}.`,
+    status: "success"
+  });
+
+  return {
+    totalParsed,
+    queued,
+    duplicatesSkipped,
+    items: processedItems
+  };
+}
+
+/**
+ * Execute a single batch of queued movies from crawler_batch_queue.
+ * Features:
+ * - FloodWait resilience & auto-cooldown backoff
+ * - Bot failover rotation across active bots
+ * - Safe inter-item pacing delays (7s)
+ * - Automatic indexing to vault upon discovery
+ */
+export async function processCronBatch(limit: number = 5): Promise<{
+  processed: number;
+  fulfilled: number;
+  failed: number;
+  skipped: number;
+  floodWaitTriggered: boolean;
+  logs: string[];
+}> {
+  if (cronConfig.isRunningBatch) {
+    return { processed: 0, fulfilled: 0, failed: 0, skipped: 0, floodWaitTriggered: false, logs: ["Batch already running."] };
+  }
+
+  // Check FloodWait cooldown
+  if (floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil) {
+    const remainSec = Math.ceil((floodWaitCooldownUntil - Date.now()) / 1000);
+    const msg = `Cron paused: Active FloodWait cooldown (${remainSec}s remaining).`;
+    console.warn(`[CronCrawler] ${msg}`);
+    return { processed: 0, fulfilled: 0, failed: 0, skipped: 0, floodWaitTriggered: true, logs: [msg] };
+  }
+
+  cronConfig.isRunningBatch = true;
+  cronConfig.lastRunAt = new Date().toISOString();
+  const logs: string[] = [];
+  let fulfilled = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  try {
+    // Fetch pending items
+    const queueRows = (await db.execute({
+      sql: `SELECT * FROM crawler_batch_queue 
+            WHERE status = 'pending' OR (status = 'failed' AND attempts < ?) 
+            ORDER BY id ASC LIMIT ?`,
+      args: [cronConfig.maxRetries, limit]
+    })).rows as unknown as BatchQueueItem[];
+
+    if (queueRows.length === 0) {
+      logs.push("Queue empty. No pending items to process.");
+      cronConfig.isRunningBatch = false;
+      return { processed: 0, fulfilled: 0, failed: 0, skipped: 0, floodWaitTriggered: false, logs };
+    }
+
+    logs.push(`Starting cron batch run of ${queueRows.length} movies...`);
+
+    // Get active search bots ordered by priority
+    const activeBots = (await db.execute("SELECT * FROM search_bots WHERE status = 'active' ORDER BY priority ASC")).rows as unknown as SearchBot[];
+    const botList = activeBots.length > 0 ? activeBots : DEFAULT_SEARCH_BOTS.map((b, i) => ({ ...b, id: i + 1, status: "active" as const, success_count: 0, last_queried_at: null, created_at: "" }));
+
+    for (const item of queueRows) {
+      // Re-check FloodWait before each query
+      if (floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil) {
+        logs.push(`FloodWait cooldown hit. Halting batch safely.`);
+        break;
+      }
+
+      // Mark processing
+      await db.execute({
+        sql: "UPDATE crawler_batch_queue SET status = 'processing', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        args: [item.id]
+      });
+
+      // Quick secondary deduplication check in case it was added in the meantime
+      const dupCheck = await checkVaultDuplicate(item.clean_title, item.requested_quality);
+      if (dupCheck.isDuplicate) {
+        await db.execute({
+          sql: "UPDATE crawler_batch_queue SET status = 'duplicate_skipped', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          args: [dupCheck.reason || "Duplicate found in Vault", item.id]
+        });
+        skipped++;
+        logs.push(`⏭️ Skipped "${item.clean_title}": ${dupCheck.reason}`);
+        continue;
+      }
+
+      let itemFulfilled = false;
+      let lastErr = "";
+      let botUsedSuccess = "";
+
+      // Try bots sequentially in priority order (failover rotation)
+      for (const bot of botList) {
+        try {
+          logs.push(`🔍 Querying ${bot.bot_username} for "${item.clean_title}"...`);
+          const searchRes = await testQuerySearchBot(bot.bot_username, item.clean_title);
+
+          if (searchRes.found && searchRes.messageId) {
+            // Find download button or first button
+            const firstBtn = searchRes.buttons?.find(b => b.isDownload) || searchRes.buttons?.[0];
+            const fwdRes = await fetchAndForwardBotMedia({
+              botUsername: bot.bot_username,
+              messageId: searchRes.messageId,
+              buttonRow: firstBtn?.row,
+              buttonCol: firstBtn?.col
+            });
+
+            if (fwdRes.success) {
+              itemFulfilled = true;
+              botUsedSuccess = bot.bot_username;
+              fulfilled++;
+
+              await db.execute({
+                sql: `UPDATE crawler_batch_queue SET 
+                      status = 'completed', 
+                      bot_used = ?, 
+                      media_file_id = ?, 
+                      last_error = NULL, 
+                      updated_at = CURRENT_TIMESTAMP 
+                      WHERE id = ?`,
+                args: [bot.bot_username, fwdRes.mediaFileId || null, item.id]
+              });
+
+              logs.push(`✅ Successfully indexed "${item.clean_title}" into Vault via ${bot.bot_username}!`);
+              break;
+            }
+          } else {
+            lastErr = searchRes.error || "No results returned";
+          }
+        } catch (botErr: any) {
+          lastErr = botErr.message || "Bot query failed";
+          logs.push(`⚠️ Error on ${bot.bot_username} for "${item.clean_title}": ${lastErr}`);
+
+          // Check if FloodWait error
+          if (botErr.message?.includes("FLOOD_WAIT") || botErr.seconds) {
+            const waitSec = Number(botErr.seconds) || 30;
+            floodWaitCooldownUntil = Date.now() + (waitSec * 1000);
+            logs.push(`⏳ Telegram FloodWait activated: pausing for ${waitSec}s.`);
+            break;
+          }
+        }
+
+        // Pacing delay between bot tries
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      if (!itemFulfilled) {
+        failed++;
+        const newStatus = (item.attempts + 1) >= cronConfig.maxRetries ? "failed" : "pending";
+        await db.execute({
+          sql: "UPDATE crawler_batch_queue SET status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          args: [newStatus, lastErr || "Not found on any search bots", item.id]
+        });
+        logs.push(`❌ Failed "${item.clean_title}": ${lastErr || "Not found on external bots"}`);
+      }
+
+      // Safe delay between items (e.g. 7s) to protect auxiliary account
+      await new Promise(r => setTimeout(r, cronConfig.delayBetweenItemsMs));
+    }
+
+    logActivity({
+      type: "channel_crawl",
+      source: "Cron Scheduler",
+      title: `Batch Run Complete (${fulfilled} fulfilled, ${failed} failed, ${skipped} skipped)`,
+      details: logs.slice(-3).join(" | "),
+      status: fulfilled > 0 ? "success" : "cooldown"
+    });
+
+  } catch (batchErr: any) {
+    logs.push(`Batch error: ${batchErr.message}`);
+    console.error("[CronCrawler] Batch error:", batchErr);
+  } finally {
+    cronConfig.isRunningBatch = false;
+  }
+
+  return {
+    processed: fulfilled + failed + skipped,
+    fulfilled,
+    failed,
+    skipped,
+    floodWaitTriggered: floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil,
+    logs
+  };
+}
+
+/**
+ * Configure & Start / Stop the recurring background cron job timer
+ */
+export function configureCronJob(options: Partial<CronConfig>): CronConfig {
+  if (options.isEnabled !== undefined) cronConfig.isEnabled = options.isEnabled;
+  if (options.batchSize !== undefined) cronConfig.batchSize = Math.max(1, Math.min(25, options.batchSize));
+  if (options.intervalMinutes !== undefined) cronConfig.intervalMinutes = Math.max(1, options.intervalMinutes);
+  if (options.delayBetweenItemsMs !== undefined) cronConfig.delayBetweenItemsMs = Math.max(3000, options.delayBetweenItemsMs);
+  if (options.maxRetries !== undefined) cronConfig.maxRetries = Math.max(1, options.maxRetries);
+
+  if (cronTimerHandle) {
+    clearInterval(cronTimerHandle);
+    cronTimerHandle = null;
+  }
+
+  if (cronConfig.isEnabled) {
+    const intervalMs = cronConfig.intervalMinutes * 60 * 1000;
+    cronConfig.nextRunAt = new Date(Date.now() + intervalMs).toISOString();
+
+    cronTimerHandle = setInterval(async () => {
+      console.log(`[CronScheduler] Triggering scheduled batch crawl (${cronConfig.batchSize} items)...`);
+      await processCronBatch(cronConfig.batchSize);
+      cronConfig.nextRunAt = new Date(Date.now() + (cronConfig.intervalMinutes * 60 * 1000)).toISOString();
+    }, intervalMs);
+
+    console.log(`[CronScheduler] Started cron job: every ${cronConfig.intervalMinutes}m, batch size ${cronConfig.batchSize}.`);
+  } else {
+    cronConfig.nextRunAt = null;
+    console.log("[CronScheduler] Cron job stopped/paused.");
+  }
+
+  return cronConfig;
+}
+
+export async function getCronStatus() {
+  // Get queue counts
+  let counts = {
+    total: 0,
+    pending: 0,
+    processing: 0,
+    completed: 0,
+    duplicate_skipped: 0,
+    failed: 0
+  };
+
+  try {
+    const rows = (await db.execute(`
+      SELECT status, COUNT(*) as count FROM crawler_batch_queue GROUP BY status
+    `)).rows;
+
+    for (const r of rows as any[]) {
+      const st = r.status as keyof typeof counts;
+      const cnt = Number(r.count) || 0;
+      counts.total += cnt;
+      if (st in counts) {
+        counts[st] = cnt;
+      }
+    }
+  } catch (_) {}
+
+  return {
+    config: cronConfig,
+    counts,
+    floodWaitActive: floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil,
+    floodWaitSeconds: floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil ? Math.ceil((floodWaitCooldownUntil - Date.now()) / 1000) : 0
+  };
+}
+
+export async function getCronBatchQueue(status?: string, limit: number = 50): Promise<BatchQueueItem[]> {
+  try {
+    if (status && status !== "all") {
+      const rows = (await db.execute({
+        sql: "SELECT * FROM crawler_batch_queue WHERE status = ? ORDER BY id DESC LIMIT ?",
+        args: [status, limit]
+      })).rows;
+      return rows as unknown as BatchQueueItem[];
+    }
+    const rows = (await db.execute({
+      sql: "SELECT * FROM crawler_batch_queue ORDER BY id DESC LIMIT ?",
+      args: [limit]
+    })).rows;
+    return rows as unknown as BatchQueueItem[];
+  } catch (_) {
+    return [];
+  }
+}
+
+export async function clearCronBatchQueue(type: "all" | "completed" | "failed" = "completed"): Promise<boolean> {
+  try {
+    if (type === "all") {
+      await db.execute("DELETE FROM crawler_batch_queue");
+    } else if (type === "completed") {
+      await db.execute("DELETE FROM crawler_batch_queue WHERE status IN ('completed', 'duplicate_skipped')");
+    } else if (type === "failed") {
+      await db.execute("DELETE FROM crawler_batch_queue WHERE status = 'failed'");
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+

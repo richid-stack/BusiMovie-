@@ -1,6 +1,39 @@
 [
   {
-    "id": 61,
+    "id": 76,
+    "bot_username": "@quinsonnbot",
+    "bot_type": "inline",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 3,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 17:51:35"
+  },
+  {
+    "id": 77,
+    "bot_username": "@iPapkornEzPzBot",
+    "bot_type": "command",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 2,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 17:51:35"
+  },
+  {
+    "id": 78,
+    "bot_username": "@iPapkornDeltaBot",
+    "bot_type": "command",
+    "command_template": "/search {query}",
+    "status": "active",
+    "priority": 3,
+    "success_count": 0,
+    "last_queried_at": null,
+    "created_at": "2026-10-02 17:51:35"
+  },
+  {
+    "id": 79,
     "bot_username": "@Apple_moviebot",
     "bot_type": "command",
     "command_template": "/search {query}",
@@ -8,10 +41,10 @@
     "priority": 1,
     "success_count": 0,
     "last_queried_at": null,
-    "created_at": "2026-10-02 11:42:00"
+    "created_at": "2026-10-02 17:51:35"
   },
   {
-    "id": 62,
+    "id": 80,
     "bot_username": "@cinemagic_hd_bot",
     "bot_type": "command",
     "command_template": "/search {query}",
@@ -19,10 +52,10 @@
     "priority": 1,
     "success_count": 0,
     "last_queried_at": null,
-    "created_at": "2026-10-02 11:42:00"
+    "created_at": "2026-10-02 17:51:35"
   },
   {
-    "id": 63,
+    "id": 81,
     "bot_username": "@TGMovieSearchBot",
     "bot_type": "inline",
     "command_template": "/search {query}",
@@ -30,10 +63,10 @@
     "priority": 1,
     "success_count": 0,
     "last_queried_at": null,
-    "created_at": "2026-10-02 11:42:00"
+    "created_at": "2026-10-02 17:51:35"
   },
   {
-    "id": 64,
+    "id": 82,
     "bot_username": "@FilesSearchMasterBot",
     "bot_type": "command",
     "command_template": "/find {query}",
@@ -41,10 +74,10 @@
     "priority": 2,
     "success_count": 0,
     "last_queried_at": null,
-    "created_at": "2026-10-02 11:42:00"
+    "created_at": "2026-10-02 17:51:35"
   },
   {
-    "id": 65,
+    "id": 83,
     "bot_username": "@iPapkornSearchBot",
     "bot_type": "inline",
     "command_template": "{query}",
@@ -52,6 +85,6 @@
     "priority": 3,
     "success_count": 0,
     "last_queried_at": null,
-    "created_at": "2026-10-02 11:42:00"
+    "created_at": "2026-10-02 17:51:35"
   }
 ]
