@@ -73,10 +73,8 @@ const DEFAULT_TARGET_CHANNELS = [
 
 const DEFAULT_SEARCH_BOTS = [
   { username: "@Apple_moviebot", type: "command" as const, command: "/search {query}", priority: 1 },
-  { username: "@iPapkornEzPzBot", type: "command" as const, command: "/search {query}", priority: 2 },
-  { username: "@iPapkornDeltaBot", type: "command" as const, command: "/search {query}", priority: 3 },
-  { username: "@TGMovieSearchBot", type: "inline" as const, command: "/search {query}", priority: 4 },
-  { username: "@FilesSearchMasterBot", type: "command" as const, command: "/find {query}", priority: 5 }
+  { username: "@iPapkornDeltaBot", type: "command" as const, command: "/search {query}", priority: 2 },
+  { username: "@iPapkornEzPzBot", type: "command" as const, command: "/search {query}", priority: 3 }
 ];
 
 export async function initCrawlerService() {
@@ -168,8 +166,11 @@ export async function initCrawlerService() {
       }
     }
 
-    // Demote @cinemagic_hd_bot if exists to priority 6 or inactive
-    await db.execute("UPDATE search_bots SET priority = 6, status = 'inactive' WHERE LOWER(bot_username) = '@cinemagic_hd_bot'");
+    // Enforce active priority bot structure: @Apple_moviebot (1), @iPapkornDeltaBot (2), @iPapkornEzPzBot (3)
+    await db.execute("UPDATE search_bots SET status = 'inactive' WHERE LOWER(bot_username) NOT IN ('@apple_moviebot', '@ipapkorndeltabot', '@ipapkorn_deltabot', '@ipapkornezpzbot')");
+    await db.execute("UPDATE search_bots SET status = 'active', priority = 1 WHERE LOWER(bot_username) = '@apple_moviebot'");
+    await db.execute("UPDATE search_bots SET status = 'active', priority = 2 WHERE LOWER(bot_username) IN ('@ipapkorndeltabot', '@ipapkorn_deltabot')");
+    await db.execute("UPDATE search_bots SET status = 'active', priority = 3 WHERE LOWER(bot_username) = '@ipapkornezpzbot'");
 
     // Reload search bots
     const botRows = (await db.execute("SELECT * FROM search_bots ORDER BY priority ASC, id ASC")).rows;
@@ -179,11 +180,23 @@ export async function initCrawlerService() {
     const jobRows = (await db.execute("SELECT * FROM search_jobs ORDER BY created_at DESC LIMIT 50")).rows;
     searchJobs = jobRows as unknown as SearchJob[];
 
+    // Restore persistent Cron Configuration from database
+    try {
+      const savedCron = await getSetting("cron_config");
+      if (savedCron) {
+        const parsed = JSON.parse(savedCron);
+        configureCronJob(parsed);
+        console.log(`[CrawlerService] Restored cron schedule from DB: isEnabled=${parsed.isEnabled}`);
+      }
+    } catch (e: any) {
+      console.warn("[CrawlerService] Cron restore error:", e.message);
+    }
+
     logActivity({
       type: "channel_crawl",
       source: "Engine Boot",
       title: "Crawler & Search Service Ready",
-      details: `Initialized with ${targets.length} target channels and ${searchBots.length} external search bots.`,
+      details: `Initialized with ${targets.length} target channels and ${searchBots.length} external search bots. Cron active: ${cronConfig.isEnabled}.`,
       status: "success"
     });
 
@@ -1142,13 +1155,13 @@ export async function fetchAndForwardBotMedia(params: {
   let parsedMovieTitle = cleanBase.substring(0, cutIdx).replace(/[._\-–—[\]()]+/g, " ").replace(/\b(WEBRip|BluRay|BRRip|x264|x265|HEVC|AAC)\b/gi, "").trim();
   if (!parsedMovieTitle || parsedMovieTitle.length < 2) parsedMovieTitle = fileName.replace(/\.[a-zA-Z0-9]+$/, "").trim();
 
+  let newFileId: number | undefined;
   try {
     const existing = newMsgId ? (await db.execute({
       sql: "SELECT id FROM media_files WHERE telegram_channel_id = ? AND telegram_message_id = ? LIMIT 1",
       args: [vaultId, newMsgId]
     })).rows : [];
 
-    let newFileId: number | undefined;
     if (existing.length === 0) {
       newFileId = await addMediaFile({
         movie_id: `tg_${Date.now()}`,
@@ -1431,7 +1444,7 @@ export function cleanMovieReleaseTitle(rawInput: string): {
 
 /**
  * Robust line parser supporting Markdown tables, Markdown lists, Numbered lists,
- * TSV, CSV, and plain movie name lists.
+ * TSV, CSV, and plain movie name lists. Intelligently skips rank/index/row columns.
  */
 export function extractLineMovieInfo(line: string): {
   rawTitle: string;
@@ -1447,21 +1460,28 @@ export function extractLineMovieInfo(line: string): {
     return { rawTitle: "", cleanTitle: "", quality: "1080p" };
   }
 
-  // Handle Markdown table row format e.g. "| 1 | Inception | 2010 | 1080p |" or "| Avatar | 2009 |"
+  // Helpers to identify row index numbers and header labels
+  const isRowIndexOrHeader = (val: string) => {
+    const v = val.trim().toLowerCase();
+    if (!v) return true;
+    if (/^(rank|id|no\.?|index|s\.?no\.?|row|#|movie|title|film|year|quality|format|name)$/i.test(v)) return true;
+    if (/^(?:row\s*\d+|\d+|#\s*\d+|no\.?\s*\d+|index\s*\d+|item\s*\d+)$/i.test(v)) return true;
+    return false;
+  };
+
+  const isYear = (val: string) => /^(19\d{2}|20\d{2})$/.test(val.trim());
+  const isQuality = (val: string) => /^(4k|2160p|1080p|720p|480p|hd|sd|uhd|bluray|web-dl)$/i.test(val.trim());
+
+  // Handle Markdown table row format e.g. "| 1 | Inception | 2010 | 1080p |"
   if (text.startsWith("|") && text.endsWith("|")) {
     const cells = text.split("|").map(c => c.trim()).filter(Boolean);
     if (cells.length > 0) {
-      let titleIndex = 0;
-      // If first cell is just an index number (1, 2, 3...)
-      if (/^\d+$/.test(cells[0]) && cells.length > 1) {
-        titleIndex = 1;
-      }
-      const rawTitleCell = cells[titleIndex] || "";
-      const yearCell = cells.find((c, idx) => idx !== titleIndex && /^(19\d{2}|20\d{2})$/.test(c));
-      const qualityCell = cells.find((c, idx) => idx !== titleIndex && /(4k|2160p|1080p|720p|480p)/i.test(c));
-      const cleaned = cleanMovieReleaseTitle(rawTitleCell);
+      const titleCell = cells.find(c => !isRowIndexOrHeader(c) && !isYear(c) && !isQuality(c)) || "";
+      const yearCell = cells.find(c => c !== titleCell && isYear(c));
+      const qualityCell = cells.find(c => c !== titleCell && isQuality(c));
+      const cleaned = cleanMovieReleaseTitle(titleCell);
       return {
-        rawTitle: rawTitleCell,
+        rawTitle: titleCell,
         cleanTitle: cleaned.cleanTitle,
         year: yearCell || cleaned.year,
         quality: qualityCell || cleaned.quality || "1080p"
@@ -1469,13 +1489,11 @@ export function extractLineMovieInfo(line: string): {
     }
   }
 
-  // Remove leading numbers, bullet markers, checkbox brackets, and markdown headers
-  // e.g. "1. ", "42) ", "- ", "* ", "• ", "[ ] ", "[x] ", "## "
-  text = text.replace(/^(?:#+\s*|\d+[\.\)\-:]\s*|[-*•]\s*|\[[\sxX]\]\s*)/g, "").trim();
+  // Remove leading row prefixes like "Row 19:", "19. ", "19) ", "No. 19: ", "#19 "
+  text = text.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d+[\.\)\-:]\s*|[-*•]\s*|\[[\sxX]\]\s*)/gi, "").trim();
 
   // Remove markdown links e.g. "[Inception](https://...)" -> "Inception"
   text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
-  // Remove markdown bold/italics
   text = text.replace(/[\*_~`]/g, "");
 
   let rawTitle = text;
@@ -1485,20 +1503,31 @@ export function extractLineMovieInfo(line: string): {
   // Check for CSV or TSV columns
   if (text.includes(",") || text.includes("\t")) {
     const delim = text.includes("\t") ? "\t" : ",";
-    const parts = text.split(delim).map(c => c.replace(/^["']|["']$/g, "").trim());
-    rawTitle = parts[0] || text;
+    const parts = text.split(delim).map(c => c.replace(/^["']|["']$/g, "").trim()).filter(Boolean);
     
-    for (let i = 1; i < parts.length; i++) {
-      const part = parts[i];
-      if (/^(19\d{2}|20\d{2})$/.test(part)) {
-        targetYear = part;
-      } else if (/(4k|2160p|1080p|720p|480p)/i.test(part)) {
-        targetQuality = part;
+    // Find the actual movie title column (first column that is not a row index/number, year, or quality)
+    const titlePart = parts.find(p => !isRowIndexOrHeader(p) && !isYear(p) && !isQuality(p));
+    if (titlePart) {
+      rawTitle = titlePart;
+    } else {
+      rawTitle = "";
+    }
+
+    for (const part of parts) {
+      if (part !== rawTitle) {
+        if (isYear(part)) targetYear = part;
+        else if (isQuality(part)) targetQuality = part;
       }
     }
   }
 
   const cleaned = cleanMovieReleaseTitle(rawTitle);
+
+  // Safety check: if cleanTitle is pure numbers, row label, or header keyword, reject it!
+  if (!cleaned.cleanTitle || isRowIndexOrHeader(cleaned.cleanTitle) || /^\d+$/.test(cleaned.cleanTitle)) {
+    return { rawTitle: "", cleanTitle: "", quality: "1080p" };
+  }
+
   return {
     rawTitle: rawTitle.trim(),
     cleanTitle: cleaned.cleanTitle,
@@ -1624,6 +1653,18 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     )
   `);
 
+  // Purge any existing bad numeric/header queue entries
+  try {
+    await db.execute(`
+      DELETE FROM crawler_batch_queue 
+      WHERE clean_title GLOB '[0-9]*' 
+         OR LOWER(clean_title) IN ('rank', 'id', 'title', 'movie', 'index', 'row', 'no', 'film', '#', 's.no.')
+         OR length(clean_title) < 2
+    `);
+  } catch (purgeErr: any) {
+    console.warn("[CrawlerQueue] Queue purge error:", purgeErr.message);
+  }
+
   const lines = csvContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   let totalParsed = 0;
   let queued = 0;
@@ -1631,9 +1672,12 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
   const processedItems: Array<{ title: string; cleanTitle: string; year?: string; status: string; reason?: string }> = [];
 
   for (const rawLine of lines) {
-    // Check if line is header or divider
-    if (/^(title|name|movie|film|movie_title|filename|#|index|no\.)/i.test(rawLine) && lines.indexOf(rawLine) === 0) {
-      continue;
+    // Check if line is CSV header row (contains column names like title, rank, movie, year)
+    if (lines.indexOf(rawLine) === 0) {
+      const lower = rawLine.toLowerCase();
+      if (lower.includes("title") || lower.includes("movie") || lower.includes("rank") || lower.includes("index") || lower.includes("name") || lower.includes("s.no")) {
+        continue;
+      }
     }
     if (/^[\-=#\*_]{3,}$/.test(rawLine)) {
       continue;
@@ -1726,7 +1770,58 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
  * - Automatic indexing to vault upon discovery
  * - Automatic Release Year extraction & metadata enrichment from bot responses
  */
-export async function processCronBatch(limit: number = 5): Promise<{
+export function sanitizeSearchQuery(title: string): string {
+  let text = (title || "").trim();
+  if (!text) return "";
+
+  // Strip surrounding quotes
+  text = text.replace(/^["']|["']$/g, "").trim();
+
+  // Strip row labels like "Row 19:", "19. ", "#19 ", "No. 19: "
+  text = text.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d+[\.\)\-:]\s*|[-*•]\s*)/gi, "").trim();
+
+  // Strip release groups in brackets, e.g. [YTS.MX], [Pahe.in], [1080p], [4K], [2020]
+  text = text.replace(/\[(?:YTS(?:\.MX)?|Pahe(?:\.in)?|Apple_Movies\w*|F5_FILMS|RARBG|TGx|PSA|GalaxyTV|EZTV|TorrentGalaxy|\d{3,4}p|4K|UHD)\]/gi, "");
+
+  // Extract year if present
+  let year: string | undefined;
+  const yearMatch = text.match(/\b(19\d{2}|20\d{2})\b/);
+  if (yearMatch) {
+    year = yearMatch[1];
+  }
+
+  // Strip technical release descriptors, qualities, formats, codecs, extensions
+  text = text.replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdrip|web-dl|webrip|bluray|brrip|dvdrip|hdtv|x264|x265|hevc|aac|ac3|dts|ddp5\.1|10bit|remux|extended|unrated|directors\.cut|repack)\b/gi, " ");
+
+  // Strip brackets, dots, underscores, hyphens, colons, parentheses
+  text = text.replace(/[\[\]\(\)\{\}_.:-]/g, " ");
+
+  // If year was found, keep title up to year + year itself
+  if (year) {
+    const yearIdx = text.indexOf(year);
+    if (yearIdx > 0) {
+      const cleanBase = text.substring(0, yearIdx).replace(/\s+/g, " ").trim();
+      if (cleanBase.length >= 2) {
+        text = `${cleanBase} ${year}`;
+      }
+    }
+  }
+
+  text = text.replace(/\s+/g, " ").trim();
+  return text;
+}
+
+/**
+ * Execute a single batch of queued movies from crawler_batch_queue.
+ * Features:
+ * - FloodWait resilience & auto-cooldown backoff
+ * - Sequential Bot failover (Priority 1 @Apple_moviebot -> Priority 2 @iPapkornEzPzBot -> Priority 3 @iPapkornDeltaBot)
+ * - Skips TV-only bots like @quinsonnbot for movies
+ * - Safe inter-item pacing delays (7s)
+ * - Automatic indexing & forwarding to vault upon discovery
+ * - Automatic Release Year extraction & metadata enrichment from bot responses
+ */
+export async function processCronBatch(limit: number = 5, isManualTrigger: boolean = false): Promise<{
   processed: number;
   fulfilled: number;
   failed: number;
@@ -1768,17 +1863,33 @@ export async function processCronBatch(limit: number = 5): Promise<{
       return { processed: 0, fulfilled: 0, failed: 0, skipped: 0, floodWaitTriggered: false, logs };
     }
 
-    logs.push(`Starting cron batch run of ${queueRows.length} movies...`);
+    logs.push(`Starting batch crawl of ${queueRows.length} movies...`);
 
-    // Get active search bots ordered by priority
-    const activeBots = (await db.execute("SELECT * FROM search_bots WHERE status = 'active' ORDER BY priority ASC")).rows as unknown as SearchBot[];
+    // Get active search bots ordered strictly by priority (P1: @Apple_moviebot, P2: @iPapkornEzPzBot, P3: @iPapkornDeltaBot)
+    // Ignore TV-only bots like @quinsonnbot for movie searches
+    const activeBots = (await db.execute("SELECT * FROM search_bots WHERE status = 'active' AND LOWER(bot_username) NOT LIKE '%quinson%' ORDER BY priority ASC")).rows as unknown as SearchBot[];
     const botList = activeBots.length > 0 ? activeBots : DEFAULT_SEARCH_BOTS.map((b, i) => ({ ...b, id: i + 1, status: "active" as const, success_count: 0, last_queried_at: null, created_at: "" }));
 
     for (const item of queueRows) {
+      // Re-verify if user paused or stopped cron mid-batch
+      if (!cronConfig.isEnabled && !isManualTrigger) {
+        logs.push("Cron job stopped by user. Halting batch safely.");
+        break;
+      }
+
       // Re-check FloodWait before each query
       if (floodWaitCooldownUntil !== null && Date.now() < floodWaitCooldownUntil) {
         logs.push(`FloodWait cooldown hit. Halting batch safely.`);
         break;
+      }
+
+      const searchQuery = sanitizeSearchQuery(item.clean_title);
+      if (!searchQuery || searchQuery.length < 2) {
+        await db.execute({
+          sql: "UPDATE crawler_batch_queue SET status = 'failed', last_error = 'Invalid title name', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          args: [item.id]
+        });
+        continue;
       }
 
       // Mark processing
@@ -1788,26 +1899,35 @@ export async function processCronBatch(limit: number = 5): Promise<{
       });
 
       // Quick secondary deduplication check in case it was added in the meantime
-      const dupCheck = await checkVaultDuplicate(item.clean_title, item.requested_quality);
+      const dupCheck = await checkVaultDuplicate(searchQuery, item.requested_quality);
       if (dupCheck.isDuplicate) {
         await db.execute({
           sql: "UPDATE crawler_batch_queue SET status = 'duplicate_skipped', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           args: [dupCheck.reason || "Duplicate found in Vault", item.id]
         });
         skipped++;
-        logs.push(`⏭️ Skipped "${item.clean_title}": ${dupCheck.reason}`);
+        logs.push(`⏭️ Skipped "${searchQuery}": ${dupCheck.reason}`);
         continue;
       }
 
       let itemFulfilled = false;
       let lastErr = "";
-      let botUsedSuccess = "";
 
-      // Try bots sequentially in priority order (failover rotation)
+      // Try bots strictly sequentially in failover priority order: P1 (@Apple_moviebot) -> P2 (@iPapkornEzPzBot) -> P3 (@iPapkornDeltaBot)
       for (const bot of botList) {
+        if (!cronConfig.isEnabled && !isManualTrigger) {
+          logs.push("Cron job stopped by user mid-query.");
+          break;
+        }
+
+        if (bot.bot_username.toLowerCase().includes("quinson")) {
+          console.log(`[CronCrawler] Skipping ${bot.bot_username} (TV Series bot only).`);
+          continue;
+        }
+
         try {
-          logs.push(`🔍 Querying ${bot.bot_username} for "${item.clean_title}"...`);
-          const searchRes = await testQuerySearchBot(bot.bot_username, item.clean_title);
+          logs.push(`🔍 Querying Priority ${bot.priority} Main Bot (${bot.bot_username}) for "${searchQuery}"...`);
+          const searchRes = await testQuerySearchBot(bot.bot_username, searchQuery);
 
           if (searchRes.found && searchRes.messageId) {
             // Find download button or first button
@@ -1821,7 +1941,6 @@ export async function processCronBatch(limit: number = 5): Promise<{
 
             if (fwdRes.success) {
               itemFulfilled = true;
-              botUsedSuccess = bot.bot_username;
               fulfilled++;
 
               // Auto-discover Release Year from bot button or forwarded media file name
@@ -1831,7 +1950,7 @@ export async function processCronBatch(limit: number = 5): Promise<{
                 const btnMatch = firstBtn?.text?.match(/\b(19\d{2}|20\d{2})\b/);
                 discoveredYear = fnMatch?.[1] || btnMatch?.[1];
                 if (!discoveredYear) {
-                  discoveredYear = await lookupMovieYear(item.clean_title);
+                  discoveredYear = await lookupMovieYear(searchQuery);
                 }
               }
 
@@ -1855,15 +1974,15 @@ export async function processCronBatch(limit: number = 5): Promise<{
                 });
               }
 
-              logs.push(`✅ Successfully indexed "${item.clean_title}" ${discoveredYear ? `(${discoveredYear}) ` : ""}into Vault via ${bot.bot_username}!`);
-              break;
+              logs.push(`✅ Successfully uploaded "${searchQuery}" ${discoveredYear ? `(${discoveredYear}) ` : ""}to Vault via ${bot.bot_username}!`);
+              break; // SUCCESS! Stop querying other fallback bots immediately!
             }
           } else {
             lastErr = searchRes.error || "No results returned";
           }
         } catch (botErr: any) {
           lastErr = botErr.message || "Bot query failed";
-          logs.push(`⚠️ Error on ${bot.bot_username} for "${item.clean_title}": ${lastErr}`);
+          logs.push(`⚠️ Fallover from ${bot.bot_username} on "${searchQuery}": ${lastErr}`);
 
           // Check if FloodWait error
           if (botErr.message?.includes("FLOOD_WAIT") || botErr.seconds) {
@@ -1874,7 +1993,7 @@ export async function processCronBatch(limit: number = 5): Promise<{
           }
         }
 
-        // Pacing delay between bot tries
+        // Pacing delay before attempting fallback bot
         await new Promise(r => setTimeout(r, 2000));
       }
 
@@ -1888,7 +2007,7 @@ export async function processCronBatch(limit: number = 5): Promise<{
         logs.push(`❌ Failed "${item.clean_title}": ${lastErr || "Not found on external bots"}`);
       }
 
-      // Safe delay between items (e.g. 7s) to protect auxiliary account
+      // Safe delay between items (7s) to protect auxiliary account
       await new Promise(r => setTimeout(r, cronConfig.delayBetweenItemsMs));
     }
 
@@ -1927,6 +2046,11 @@ export function configureCronJob(options: Partial<CronConfig>): CronConfig {
   if (options.delayBetweenItemsMs !== undefined) cronConfig.delayBetweenItemsMs = Math.max(3000, options.delayBetweenItemsMs);
   if (options.maxRetries !== undefined) cronConfig.maxRetries = Math.max(1, options.maxRetries);
 
+  if (!cronConfig.isEnabled) {
+    floodWaitCooldownUntil = null;
+    cronConfig.isRunningBatch = false;
+  }
+
   if (cronTimerHandle) {
     clearInterval(cronTimerHandle);
     cronTimerHandle = null;
@@ -1942,13 +2066,39 @@ export function configureCronJob(options: Partial<CronConfig>): CronConfig {
       cronConfig.nextRunAt = new Date(Date.now() + (cronConfig.intervalMinutes * 60 * 1000)).toISOString();
     }, intervalMs);
 
+    // Immediately trigger initial batch run upon start so user doesn't have to wait for interval
+    setTimeout(async () => {
+      if (cronConfig.isEnabled && !cronConfig.isRunningBatch) {
+        console.log(`[CronScheduler] Triggering initial batch crawl on cron start...`);
+        await processCronBatch(cronConfig.batchSize);
+      }
+    }, 500);
+
     console.log(`[CronScheduler] Started cron job: every ${cronConfig.intervalMinutes}m, batch size ${cronConfig.batchSize}.`);
   } else {
     cronConfig.nextRunAt = null;
     console.log("[CronScheduler] Cron job stopped/paused.");
   }
 
+  // Persist settings asynchronously
+  setSetting("cron_config", JSON.stringify(cronConfig)).catch(e => {
+    console.warn("[CronScheduler] Persist setting error:", e.message);
+  });
+
   return cronConfig;
+}
+
+export function stopAllCronJobs(): void {
+  cronConfig.isEnabled = false;
+  cronConfig.isRunningBatch = false;
+  cronConfig.nextRunAt = null;
+  floodWaitCooldownUntil = null;
+  if (cronTimerHandle) {
+    clearInterval(cronTimerHandle);
+    cronTimerHandle = null;
+  }
+  setSetting("cron_config", JSON.stringify(cronConfig)).catch(() => {});
+  console.log("[CronScheduler] EMERGENCY STOP: All background cron jobs & batches cancelled.");
 }
 
 export async function getCronStatus() {
@@ -2018,4 +2168,23 @@ export async function clearCronBatchQueue(type: "all" | "completed" | "failed" =
     return false;
   }
 }
+
+export async function requeueBatchQueue(type: "failed" | "skipped" | "all" = "all"): Promise<number> {
+  try {
+    let sql = "";
+    if (type === "all") {
+      sql = "UPDATE crawler_batch_queue SET status = 'pending', attempts = 0, last_error = NULL";
+    } else if (type === "failed") {
+      sql = "UPDATE crawler_batch_queue SET status = 'pending', attempts = 0, last_error = NULL WHERE status = 'failed'";
+    } else if (type === "skipped") {
+      sql = "UPDATE crawler_batch_queue SET status = 'pending', attempts = 0, last_error = NULL WHERE status = 'duplicate_skipped'";
+    }
+    const res = await db.execute(sql);
+    return Number(res.rowsAffected) || 0;
+  } catch (err: any) {
+    console.warn("Re-queue batch error:", err.message);
+    return 0;
+  }
+}
+
 

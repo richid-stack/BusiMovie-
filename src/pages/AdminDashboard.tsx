@@ -335,6 +335,39 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleEmergencyStop = async () => {
+    try {
+      const res = await fetch("/api/crawler/cron/stop-all", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setCronNotice({ type: "success", text: "Emergency Stop triggered: All active background cron timers and crawls stopped!" });
+        fetchCronData();
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: "Stop failed: " + err.message });
+    }
+  };
+
+  const handleRequeueBatch = async (type: "failed" | "skipped" | "all" = "all") => {
+    try {
+      const res = await fetch("/api/crawler/cron/requeue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setCronNotice({
+          type: "success",
+          text: `Re-queued ${data.requeuedCount} items back to 'pending'! You don't need to re-upload your file!`
+        });
+        fetchCronData();
+      }
+    } catch (err: any) {
+      setCronNotice({ type: "error", text: "Re-queue error: " + err.message });
+    }
+  };
+
   const handleRequestAuxCode = async (e: FormEvent) => {
     e.preventDefault();
     if (!auxPhone.trim()) return;
@@ -2132,22 +2165,49 @@ export default function AdminDashboard() {
                     onClick={() => handleToggleCron(!cronStatus?.config?.isEnabled)}
                     className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition flex items-center justify-center gap-2 ${
                       cronStatus?.config?.isEnabled
-                        ? "bg-zinc-800 hover:bg-zinc-700 text-amber-400 border border-zinc-700"
-                        : "bg-zinc-100 hover:bg-white text-zinc-950 font-bold shadow-sm"
+                        ? "bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                        : "bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm"
                     }`}
                   >
-                    {cronStatus?.config?.isEnabled ? <PauseCircle className="w-4 h-4" /> : <PlayCircle className="w-4 h-4 text-emerald-600" />}
+                    {cronStatus?.config?.isEnabled ? <PauseCircle className="w-4 h-4" /> : <PlayCircle className="w-4 h-4" />}
                     {cronStatus?.config?.isEnabled ? "Pause Cron" : "Start Cron Job"}
                   </button>
 
                   <button
                     onClick={handleRunBatchNow}
-                    disabled={runningBatchNow}
-                    className="w-full sm:w-auto px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-50 border border-zinc-700"
+                    disabled={runningBatchNow || !cronStatus?.counts?.pending}
+                    className="flex-1 sm:flex-none px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-50 border border-zinc-700"
                     title="Process 1 batch of pending movies immediately"
                   >
                     <Zap className={`w-4 h-4 ${runningBatchNow ? "animate-spin text-red-500" : "text-red-500"}`} />
-                    {runningBatchNow ? "Running Batch..." : "Run Batch Now"}
+                    {runningBatchNow ? "Running..." : "Run Batch Now"}
+                  </button>
+
+                  <button
+                    onClick={() => handleRequeueBatch("all")}
+                    className="flex-1 sm:flex-none px-3.5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-amber-300 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1.5 border border-amber-500/30"
+                    title="Re-queue skipped and failed items back to pending without uploading again"
+                  >
+                    <RotateCw className="w-3.5 h-3.5 text-amber-400" />
+                    Re-queue Items
+                  </button>
+
+                  <button
+                    onClick={() => handleClearQueue("completed")}
+                    className="flex-1 sm:flex-none px-3.5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1.5 border border-zinc-700"
+                    title="Clear completed and duplicate items from queue list"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-zinc-400" />
+                    Clear Completed
+                  </button>
+
+                  <button
+                    onClick={handleEmergencyStop}
+                    className="flex-1 sm:flex-none px-3.5 py-2.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1.5 border border-rose-800/50"
+                    title="Force stop all running cron jobs and active background crawls immediately"
+                  >
+                    <X className="w-3.5 h-3.5 text-rose-400" />
+                    Emergency Stop
                   </button>
                 </div>
               </div>

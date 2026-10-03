@@ -1,5 +1,6 @@
 {
   "test_key": "test_val",
   "telegram_user_session": "1BAAOMTQ5LjE1NC4xNjcuOTEAUEwIIEK6Bl9ZuNQVL2pj7r+1pRABKXqCaeCPUn1nE0Jm3EEjgJQ/lrpSm2Cxl6jHp9Ym1bTFMGkYp9ynzRfRZ8oCooL5WSStYrFZWFUv1Fv2nCUm/+9IoasdlWa6l86psMdV3kyhpDqm7EpWVKaEDKhBINO4vFrwmuLmS9dvIeWnuQSwSLSpf8dfMYWhNKWCdpEt4sex8Wj8BqfQNK5TeMI314TrbHBwRREmjuqslKgeGGwIHgHjRzjBjf/R0IIsweq0eIRPD31Y8RE6ptoliwU00jMKAPERbwxxRbI8iu6iDaSF35qw844jVcL7dAKOpR8rNLemde0OarP1Nf/Acfs=",
-  "telegram_vault_channel_id": "-1004314551318"
+  "telegram_vault_channel_id": "-1004314551318",
+  "cron_config": "{\"isEnabled\":false,\"batchSize\":5,\"intervalMinutes\":15,\"delayBetweenItemsMs\":7000,\"maxRetries\":3,\"lastRunAt\":null,\"nextRunAt\":null,\"isRunningBatch\":false}"
 }

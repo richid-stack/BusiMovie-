@@ -90,9 +90,11 @@ import {
   parseAndQueueCsvMovies,
   processCronBatch,
   configureCronJob,
+  stopAllCronJobs,
   getCronStatus,
   getCronBatchQueue,
-  clearCronBatchQueue
+  clearCronBatchQueue,
+  requeueBatchQueue
 } from "./src/services/crawlerService.js";
 
 async function startServer() {
@@ -969,7 +971,7 @@ async function startServer() {
   app.post("/api/crawler/cron/run-batch-now", async (req, res) => {
     try {
       const limit = req.body.limit ? parseInt(req.body.limit, 10) : 5;
-      const result = await processCronBatch(limit);
+      const result = await processCronBatch(limit, true);
       res.json({ success: true, ...result });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -992,6 +994,25 @@ async function startServer() {
       const type = (req.body.type || "completed") as "all" | "completed" | "failed";
       const success = await clearCronBatchQueue(type);
       res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/cron/stop-all", (req, res) => {
+    try {
+      stopAllCronJobs();
+      res.json({ success: true, message: "Emergency Stop: All active cron jobs and running batches cancelled." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/crawler/cron/requeue", async (req, res) => {
+    try {
+      const type = (req.body.type || "all") as "failed" | "skipped" | "all";
+      const count = await requeueBatchQueue(type);
+      res.json({ success: true, requeuedCount: count });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
