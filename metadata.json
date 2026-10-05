@@ -1,0 +1,6 @@
+{
+  "name": "Telegram Movie Vault",
+  "description": "Telegram movie and TV series bot platform with automated channel sync, keyless auto-trailer extraction, web streaming player, AI recommendations, and channel publishing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

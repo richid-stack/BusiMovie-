@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Telegram Movie Vault</title>
+    <meta name="description" content="Telegram movie and TV series bot platform with automated channel sync, keyless auto-trailer extraction, web streaming player, AI recommendations, and channel publishing." />
+    <meta property="og:title" content="Telegram Movie Vault" />
+    <meta property="og:description" content="Telegram movie and TV series bot platform with automated channel sync, keyless auto-trailer extraction, web streaming player, AI recommendations, and channel publishing." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress benign [vite] websocket connection warnings in AI Studio preview
+      (function() {
+        const _origErr = console.error;
+        console.error = function(...args) {
+          if (args[0] && typeof args[0] === 'string' && args[0].includes('[vite]')) {
+            console.debug(...args);
+            return;
+          }
+          _origErr.apply(console, args);
+        };
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
