@@ -248,6 +248,12 @@ export function logActivity(log: Omit<CrawlerActivityLog, "id" | "timestamp">) {
   }).catch(() => {});
 }
 
+// Pending phone-login state (code request -> verify). These were referenced but never declared,
+// which made the dashboard "log in with phone code" flow throw ReferenceError.
+let pendingClient: TelegramClient | null = null;
+let pendingPhone = "";
+let pendingPhoneCodeHash = "";
+
 // Active client instance if logged in
 let activeClient: TelegramClient | null = null;
 let activeUserInfo: { id?: string; username?: string; firstName?: string; phone?: string } | null = null;
@@ -1475,7 +1481,7 @@ export async function fetchAndForwardBotMedia(params: {
                 if ((candidateMsg.replyMarkup as any).rows[targetBtn.row]?.buttons[targetBtn.col]) {
                   await candidateMsg.click((candidateMsg.replyMarkup as any).rows[targetBtn.row].buttons[targetBtn.col]);
                 } else {
-                  await candidateMsg.click(targetBtn.row);
+                  await candidateMsg.click({ i: targetBtn.row, j: targetBtn.col } as any);
                 }
               } catch (stepErr: any) {
                 console.warn("[Intelligent Eye] Follow-up click error:", stepErr?.message);

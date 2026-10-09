@@ -9,3 +9,9 @@ coverage/
 movie-bot.db
 .env*
 !.env.example
+
+# Local state / secrets - never commit
+*_backup.json
+vault_library.json
+.aistudio/
+*.session

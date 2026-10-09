@@ -1,5 +1,44 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------
+   BusiMovie design tokens
+   Accent = the grain gradient: pink -> red-orange -> amber on near-black ink.
+   --------------------------------------------------------------- */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Sora", "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #09090b;
+  --color-surface-1: #111114;
+  --color-surface-2: #18181c;
+  --color-surface-3: #222228;
+  --color-line: #2a2a31;
+
+  --color-ember-pink: #fe1d68;
+  --color-ember-red: #fe4928;
+  --color-ember-amber: #feaf02;
+
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html {
+    background: var(--color-ink);
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    background: var(--color-ink);
+    color: #f4f4f5;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: rgba(254, 73, 40, 0.45);
+  }
+}
+
 @layer utilities {
   .no-scrollbar::-webkit-scrollbar {
     display: none;
@@ -7,5 +46,63 @@
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+  /* alias kept for existing markup */
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .bg-ember {
+    background-image: linear-gradient(135deg, var(--color-ember-pink), var(--color-ember-red) 55%, var(--color-ember-amber));
+  }
+  .text-ember {
+    background-image: linear-gradient(135deg, var(--color-ember-pink), var(--color-ember-red) 55%, var(--color-ember-amber));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .ring-ember {
+    box-shadow: 0 0 0 1px rgba(254, 73, 40, 0.55), 0 8px 40px -8px rgba(254, 73, 40, 0.45);
+  }
+}
+
+/* Slow ambient drift of the grain gradient (transform only: no per-frame pixel work). */
+@keyframes bm-drift {
+  0% {
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+  }
+  50% {
+    transform: translate(-47.5%, -52%) scale(1.04) rotate(0.6deg);
+  }
+  100% {
+    transform: translate(-52%, -48.5%) scale(1.02) rotate(-0.5deg);
+  }
+}
+.bm-drift {
+  animation: bm-drift 18s ease-in-out infinite alternate;
+}
+
+@keyframes bm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.bm-rise {
+  animation: bm-rise 0.7s var(--ease-spring) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bm-drift,
+  .bm-rise {
+    animation: none !important;
   }
 }

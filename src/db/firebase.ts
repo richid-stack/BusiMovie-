@@ -18,6 +18,10 @@ let isConfigured = false;
 
 export function initFirebase(): Firestore | null {
   if (firestoreDb) return firestoreDb;
+  // Set DISABLE_FIRESTORE=1 to run on the database alone (recommended once TURSO_* is configured).
+  if (process.env.DISABLE_FIRESTORE === "1" || process.env.DISABLE_FIRESTORE === "true") {
+    return null;
+  }
 
   try {
     const configPath = path.resolve(process.cwd(), "firebase-applet-config.json");

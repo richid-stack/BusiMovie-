@@ -32,12 +32,20 @@ import {
   publishMovieToTelegramChannel,
   broadcastAnnouncement,
   sendSmartReEngagementBroadcast,
-  getFileStreamInfo,
   getBotWebhookInfo,
   setBotWebhook,
   deleteBotWebhook
 } from "./src/bot/index.js";
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
+import {
+  registerAuthRoutes,
+  apiGate,
+  verifyWebhookRequest,
+  getWebhookSecret,
+  createRateLimiter,
+  clientIp,
+  getSessionFromRequest
+} from "./src/server/auth.js";
 import { searchMovies } from "./src/services/movieProvider.js";
 import { getOfficialTrailer } from "./src/services/trailerService.js";
 import * as pdfModule from "pdf-parse";
@@ -102,18 +110,81 @@ import {
   requeueBatchQueue
 } from "./src/services/crawlerService.js";
 
+// A network hiccup in a background task (Telegram, Firestore, external bots) must never take the whole server down.
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[unhandledRejection]", reason?.message || reason);
+});
+process.on("uncaughtException", (err: any) => {
+  console.error("[uncaughtException]", err?.message || err);
+});
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Behind Cloud Run / AI Studio proxy: trust X-Forwarded-* so req.ip and req.secure are correct
+  app.set("trust proxy", 1);
+
   // Middleware for JSON
-  app.use(express.json());
+  app.use(express.json({ limit: "10mb" }));
 
   // Ensure all /api responses have JSON content-type
   app.use("/api", (req, res, next) => {
     res.setHeader("Content-Type", "application/json");
     next();
   });
+
+  // ---- Security: every /api route is ADMIN-ONLY unless listed in src/server/auth.ts PUBLIC_ROUTES ----
+  registerAuthRoutes(app, () => (bot as any)?.botInfo?.username || cachedBotUsername);
+  app.use("/api", apiGate);
+
+  // ---- Public-data helpers ----
+  const INTERNAL_KEYS = new Set(["telegram_file_id", "telegram_channel_id", "telegram_message_id"]);
+  const stripInternal = (value: any): any => {
+    if (Array.isArray(value)) return value.map(stripInternal);
+    if (value && typeof value === "object") {
+      const out: any = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (INTERNAL_KEYS.has(k)) continue;
+        out[k] = stripInternal(v);
+      }
+      return out;
+    }
+    return value;
+  };
+  const isAdminRequest = (req: any) => !!getSessionFromRequest(req);
+
+  // Public requests are limited per IP, and never crawl inline (they go through a single sequential queue)
+  const requestLimiter = createRateLimiter({ windowMs: 24 * 60 * 60 * 1000, max: 5, keyPrefix: "request" });
+  const searchLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 40, keyPrefix: "search" });
+  app.use("/api/search-test", searchLimiter.middleware());
+  app.use("/api/trailer", searchLimiter.middleware());
+
+  const autoFetchQueue: Array<{ title: string; userId: string }> = [];
+  let autoFetchRunning = false;
+  const enqueueAutoFetch = (title: string, userId: string) => {
+    if (autoFetchQueue.some((j) => j.title.toLowerCase() === title.toLowerCase())) return;
+    if (autoFetchQueue.length >= 25) return;
+    autoFetchQueue.push({ title, userId });
+    void runAutoFetchQueue();
+  };
+  const runAutoFetchQueue = async () => {
+    if (autoFetchRunning) return;
+    autoFetchRunning = true;
+    try {
+      while (autoFetchQueue.length > 0) {
+        const job = autoFetchQueue.shift()!;
+        try {
+          await dispatchAutomatedSearch(job.title, job.userId, bot);
+        } catch (e: any) {
+          console.warn("[AutoFetchQueue] job failed:", e?.message || e);
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    } finally {
+      autoFetchRunning = false;
+    }
+  };
 
   // Database initialization state
   let dbReady = false;
@@ -129,6 +200,7 @@ async function startServer() {
 
   // Telegram Bot initialization & Dual Mode (24/7 Webhook or Long Polling)
   let bot: any = null;
+  let cachedBotUsername: string | undefined;
   let botActive = false;
   let botMode: "polling" | "webhook" | "inactive" = "inactive";
 
@@ -139,10 +211,28 @@ async function startServer() {
       bot.telegram
         .getWebhookInfo()
         .then(async (info: any) => {
+          try {
+            const me = await bot.telegram.getMe();
+            cachedBotUsername = me?.username;
+          } catch (_) {}
           if (info?.url) {
             botActive = true;
             botMode = "webhook";
             console.log(`[Telegram Bot] Webhook active at: ${info.url}`);
+            // Make sure the registered webhook carries our secret token (older webhooks had none).
+            try {
+              await bot.telegram.setWebhook(info.url, {
+                secret_token: getWebhookSecret(),
+                drop_pending_updates: false,
+                allowed_updates: [
+                  "message", "edited_message", "channel_post", "edited_channel_post",
+                  "callback_query", "inline_query", "chat_member", "my_chat_member"
+                ]
+              });
+              console.log("[Telegram Bot] Webhook re-registered with secret token.");
+            } catch (e: any) {
+              console.warn("[Telegram Bot] Could not refresh webhook secret:", e?.message || e);
+            }
           } else {
             // Launch polling if no webhook is registered
             botActive = true;
@@ -191,6 +281,10 @@ async function startServer() {
   app.post("/api/telegram-webhook", async (req, res) => {
     if (!bot) {
       return res.status(503).json({ error: "Bot not initialized" });
+    }
+    // Only Telegram knows this secret (it is registered with setWebhook). Rejects forged updates.
+    if (!verifyWebhookRequest(req)) {
+      return res.status(401).json({ error: "Invalid webhook secret" });
     }
     try {
       await bot.handleUpdate(req.body, res);
@@ -369,6 +463,7 @@ async function startServer() {
       const raw = req.query.raw === "true";
 
       if (raw) {
+        if (!isAdminRequest(req)) return res.status(401).json({ error: "Admin login required", code: "AUTH_REQUIRED" });
         const files = await getAllMediaFiles();
         return res.json({ count: files.length, files });
       }
@@ -396,7 +491,7 @@ async function startServer() {
         }
       }, 0);
 
-      res.json({ count: files.length, files });
+      res.json({ count: files.length, files: isAdminRequest(req) ? files : stripInternal(files) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -407,7 +502,7 @@ async function startServer() {
     try {
       const q = req.query.q as string | undefined;
       const catalog = await getVaultSeriesCatalog(q);
-      res.json(catalog);
+      res.json(isAdminRequest(req) ? catalog : stripInternal(catalog));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -419,12 +514,12 @@ async function startServer() {
       const season = req.query.season ? parseInt(req.query.season as string, 10) : undefined;
       if (season) {
         const episodes = await getSeriesSeasonEpisodes(title, season);
-        return res.json(episodes);
+        return res.json(isAdminRequest(req) ? episodes : stripInternal(episodes));
       }
       const allFiles = await getAllMediaFiles();
       const episodes = allFiles.filter(f => f.movie_title.toLowerCase().trim() === title.toLowerCase().trim() && f.season !== null && f.season !== undefined)
         .sort((a, b) => ((Number(a.season) || 0) * 1000 + (Number(a.episode) || 0)) - ((Number(b.season) || 0) * 1000 + (Number(b.episode) || 0)));
-      res.json(episodes);
+      res.json(isAdminRequest(req) ? episodes : stripInternal(episodes));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -638,14 +733,25 @@ async function startServer() {
   });
 
   // Create request from Storefront/WebApp with optional auto-fetch
-  app.post("/api/requests/create", async (req, res) => {
+  app.post("/api/requests/create", async (req, res, next) => {
+    // Anonymous visitors are rate limited per IP; admins are not.
+    if (!isAdminRequest(req)) {
+      const r = requestLimiter.hit(clientIp(req));
+      if (!r.allowed) {
+        res.setHeader("Retry-After", String(r.retryAfterSec));
+        return res.status(429).json({ error: "You've reached today's request limit. Please try again tomorrow." });
+      }
+    }
+    next();
+  }, async (req, res) => {
     try {
       const { title, telegram_id, auto_fetch } = req.body;
       if (!title || !title.trim()) {
         return res.status(400).json({ error: "Movie title is required" });
       }
-      const cleanTitle = title.trim();
-      const userId = telegram_id || "web_user";
+      const cleanTitle = String(title).trim().slice(0, 120);
+      // Public callers can't impersonate a Telegram user (that would let them make the bot message anyone)
+      const userId = isAdminRequest(req) ? (telegram_id || "web_user") : "web_user";
 
       // Check if already in vault
       const existing = (await db.execute({
@@ -679,7 +785,12 @@ async function startServer() {
       // If auto-fetch requested, dispatch search immediately
       let fetchResult: any = null;
       if (auto_fetch !== false) {
-        fetchResult = await dispatchAutomatedSearch(cleanTitle, userId, bot);
+        if (isAdminRequest(req)) {
+          fetchResult = await dispatchAutomatedSearch(cleanTitle, userId, bot);
+        } else {
+          // Public visitors never trigger a crawl inline: queue it (one at a time)
+          enqueueAutoFetch(cleanTitle, userId);
+        }
       }
 
       res.json({
@@ -688,8 +799,8 @@ async function startServer() {
         title: cleanTitle,
         autoFetch: fetchResult,
         message: fetchResult?.success 
-          ? `Auto-fetched "${cleanTitle}" and added to Vault!` 
-          : `Request submitted for "${cleanTitle}". Automated bots queued to search.`
+          ? `"${cleanTitle}" was found and added!`
+          : `Request received for "${cleanTitle}". We'll look for it and let you know.`
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1194,11 +1305,19 @@ async function startServer() {
   app.get("/api/media/:id/stream", async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      if (!bot) {
-        return res.status(503).json({ error: "Bot not initialized" });
-      }
-      const streamInfo = await getFileStreamInfo(bot, id);
-      res.json({ success: true, ...streamInfo });
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+      const row = (await db.execute({ sql: "SELECT id, movie_title, file_name, file_size, quality FROM media_files WHERE id = ?", args: [id] })).rows[0] as any;
+      if (!row) return res.status(404).json({ error: "File not found" });
+      const username = cachedBotUsername || (bot as any)?.botInfo?.username;
+      // Deep link only: the Telegram bot delivers the file. Never expose Telegram file URLs (they contain the bot token).
+      res.json({
+        success: true,
+        title: row.movie_title,
+        fileName: row.file_name,
+        fileSize: row.file_size,
+        quality: row.quality,
+        watchUrl: username ? `https://t.me/${username}?start=watch_${id}` : null
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1288,36 +1407,6 @@ async function startServer() {
       const results = await searchMovies(query);
       res.json({ query, count: results.length, results });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Phase 6: Radarr/Sonarr Webhook Ingestion (Telegramarr Architecture)
-  // Radarr sends a POST here when a movie finishes downloading.
-  app.post("/api/webhooks/arr", async (req, res) => {
-    try {
-      const payload = req.body;
-      console.log("[Webhook] Received event from *Arr:", payload.eventType);
-
-      if (payload.eventType === "Download" || payload.eventType === "Test") {
-        const title = payload.movie?.title || payload.series?.title || "Unknown Media";
-        const tmdbId = payload.movie?.tmdbId?.toString() || payload.series?.tvdbId?.toString();
-        
-        console.log(`[Webhook] Media Ready: ${title} (ID: ${tmdbId})`);
-        
-        // In a full production setup:
-        // 1. This triggers a worker to ingest the file into the Telegram channel
-        // 2. The worker gets the Telegram file_id
-        // 3. The worker updates our local DB
-        // 4. The worker notifies the user
-        
-        // For now, we mock the ingestion success response back to Radarr
-        res.status(200).json({ success: true, message: "Webhook acknowledged by BusiMovie" });
-      } else {
-        res.status(200).json({ ignored: true, message: "Event type not handled" });
-      }
-    } catch (err: any) {
-      console.error("[Webhook Error]:", err);
       res.status(500).json({ error: err.message });
     }
   });

@@ -18,9 +18,17 @@ import {
 import { parseMediaTitleAndSeriesInfo, groupMediaIntoCatalog } from "../services/seriesParser.js";
 
 // Initialize the SQLite database
-const db = createClient({
-  url: "file:movie-bot.db",
-});
+// Persistent hosted database (recommended on Cloud Run / AI Studio, where the local disk is wiped on restart):
+// set TURSO_DATABASE_URL (e.g. libsql://your-db.turso.io) and TURSO_AUTH_TOKEN in your Secrets.
+// Without them it falls back to the local SQLite file.
+const db = createClient(
+  process.env.TURSO_DATABASE_URL
+    ? { url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN }
+    : { url: "file:movie-bot.db" }
+);
+
+// Secrets must never be mirrored to disk JSON or Firestore (both were world-readable).
+const SECRET_SETTING_KEYS = new Set(["telegram_user_session"]);
 
 const BACKUP_FILE = path.join(process.cwd(), "vault_library.json");
 const SETTINGS_BACKUP_FILE = path.join(process.cwd(), "settings_backup.json");
@@ -377,7 +385,7 @@ export async function setupDatabase() {
   try {
     const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
     for (const [k, v] of Object.entries(diskSettings)) {
-      if (v) {
+      if (v && !SECRET_SETTING_KEYS.has(k)) {
         await db.execute({
           sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
           args: [k, v]
@@ -387,7 +395,7 @@ export async function setupDatabase() {
 
     const cloudSettings = await getAllAppSettingsFromFirestore();
     for (const [k, v] of Object.entries(cloudSettings)) {
-      if (v) {
+      if (v && !SECRET_SETTING_KEYS.has(k)) {
         await db.execute({
           sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
           args: [k, v]
@@ -677,6 +685,7 @@ export async function getSetting(key: string): Promise<string | null> {
     if (res.rows && res.rows.length > 0 && res.rows[0].value) {
       return String(res.rows[0].value);
     }
+    if (SECRET_SETTING_KEYS.has(key)) return null; // never fall back to disk/Firestore mirrors for secrets
 
     // 2. Check local disk backup
     const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
@@ -712,6 +721,8 @@ export async function setSetting(key: string, value: string): Promise<void> {
       sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
       args: [key, value]
     });
+
+    if (SECRET_SETTING_KEYS.has(key)) return; // secrets live only in the database (or env), never in mirrors
 
     // 2. Save to local disk backup
     const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});

@@ -18,7 +18,6 @@
     "@tailwindcss/vite": "^4.1.14",
     "@types/pdf-parse": "^1.1.5",
     "@types/string-similarity": "^4.0.2",
-    "@types/torrent-stream": "^0.0.9",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.20.0",
     "dotenv": "^17.2.3",
@@ -33,7 +32,6 @@
     "string-similarity": "^4.0.4",
     "telegraf": "^4.16.3",
     "telegram": "^2.26.22",
-    "torrent-stream": "^1.2.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {

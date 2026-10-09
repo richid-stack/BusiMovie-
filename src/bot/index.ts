@@ -29,7 +29,7 @@ import {
   getCallbackKey
 } from "../db/index.js";
 import { getAIMovieRecommendations, analyzeUserIntent, generateMoviePostWatchFollowUp } from "../services/gemini.js";
-import { searchOpenTracker, downloadTorrent } from "../services/torrentEngine.js";
+import { isAdminTelegramId, getWebhookSecret } from "../server/auth.js";
 import {
   testQuerySearchBot,
   fetchAndForwardBotMedia,
@@ -906,31 +906,21 @@ export async function sendSmartReEngagementBroadcast(
 }
 
 export async function getFileStreamInfo(
-  bot: Telegraf,
+  _bot: Telegraf,
   fileId: number
-): Promise<{ streamUrl?: string; fileName?: string; fileSize?: number; title: string; quality?: string; tgDirectLink?: string }> {
+): Promise<{ fileName?: string; fileSize?: number; title: string; quality?: string }> {
+  // NOTE: never return Telegram file URLs here: they embed the bot token. Deliver through the bot instead.
   const res = await db.execute({
     sql: "SELECT * FROM media_files WHERE id = ?",
     args: [fileId]
   });
   const file = res.rows[0] as any;
   if (!file) throw new Error("File not found");
-
-  let tgDirectLink: string | undefined;
-  try {
-    const fileLink = await bot.telegram.getFileLink(file.telegram_file_id);
-    tgDirectLink = fileLink.toString();
-  } catch (e: any) {
-    console.warn("Could not get Telegram direct link (file may be > 20MB):", e?.message);
-  }
-
   return {
     title: file.movie_title,
     fileName: file.file_name,
     fileSize: file.file_size,
-    quality: file.quality,
-    streamUrl: tgDirectLink,
-    tgDirectLink
+    quality: file.quality
   };
 }
 
@@ -947,6 +937,7 @@ export async function setBotWebhook(bot: Telegraf, url: string) {
   try {
     const fullUrl = url.endsWith("/api/telegram-webhook") ? url : `${url.replace(/\/$/, "")}/api/telegram-webhook`;
     await bot.telegram.setWebhook(fullUrl, {
+      secret_token: getWebhookSecret(),
       drop_pending_updates: true,
       allowed_updates: [
         "message",
@@ -1549,8 +1540,7 @@ export function initializeBot(): Telegraf | null {
   // Phase 4: Statistics & User Profile
   bot.command("stats", async (ctx) => {
     await ensureUser(ctx);
-    const adminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID;
-    const isOwner = adminChatId && ctx.from?.id && String(ctx.from.id) === String(adminChatId);
+    const isOwner = isAdminTelegramId(ctx.from?.id);
 
     if (isOwner) {
       const files = await getAllMediaFiles();
@@ -1590,6 +1580,10 @@ export function initializeBot(): Telegraf | null {
   // Phase 4: Admin Broadcast Command
   bot.command("broadcast", async (ctx) => {
     await ensureUser(ctx);
+    if (!isAdminTelegramId(ctx.from?.id)) {
+      // Silent for non-admins: don't reveal that the command exists
+      return;
+    }
     const msg = ctx.message.text.replace(/^\/broadcast(@\w+)?/i, "").trim();
     if (!msg) {
       return ctx.reply("📢 <b>Broadcast Announcement</b>\n\nUsage: <code>/broadcast Your message here</code>", { parse_mode: "HTML" });
@@ -2625,53 +2619,15 @@ function cleanReleaseButtonLabel(rawText: string): string {
   });
 
   // Phase 6 POC: Direct Download Action
-  bot.action(/^dl_(.+)$/, async (ctx) => {
-    await ensureUser(ctx);
-    const hash = ctx.match[1];
-    
-    ctx.answerCbQuery("Starting download...");
-    const progressMsg = await ctx.reply("⬇️ Initiating direct download pipeline...");
-    
-    try {
-      const { filePath, fileName, size } = await downloadTorrent(hash, (progress, speed) => {
-        // Debounce or update safely
-        ctx.telegram.editMessageText(
-          ctx.chat.id,
-          progressMsg.message_id,
-          undefined,
-          `⬇️ Downloading: ${progress}% (Speed: ${(speed / 1024 / 1024).toFixed(2)} MB/s)`
-        ).catch(() => {});
-      });
-
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        progressMsg.message_id,
-        undefined,
-        `✅ Download complete! File: ${fileName} (${(size / 1024 / 1024).toFixed(2)} MB)\n\nProcessing for BusiMovie...`
-      );
-
-      // Attempt to upload to Telegram
-      try {
-        await ctx.replyWithVideo({ source: filePath }, { caption: `🎬 ${fileName}\n\nIngested via BusiMovie Automation` });
-        await ctx.reply("🎉 Successfully added to BusiMovie!");
-      } catch (uploadErr: any) {
-        if (uploadErr.message?.includes("Request Entity Too Large")) {
-           await ctx.reply(`⚠️ **Telegram API Limit Reached.**\n\nThe file (${(size / 1024 / 1024).toFixed(2)} MB) exceeds the standard 50MB bot upload limit. In production, the BusiMovie worker (Telegramarr) uses a user-client (MTProto) or local bot server to upload files up to 2GB.\n\nHowever, the download automation succeeded!`);
-        } else {
-           await ctx.reply(`❌ Upload failed: ${uploadErr.message}`);
-        }
-      }
-
-    } catch (error: any) {
-      console.error("Torrent DL Error:", error);
-      ctx.reply(`❌ Download failed: ${error.message}`);
-    }
-  });
-
   // Direct video upload to the bot or group
   bot.on("video", async (ctx) => {
     try {
       await ensureUser(ctx);
+      // Only admins can add files from a private chat (otherwise anyone could publish videos into the catalog)
+      if (ctx.chat.type === "private" && !isAdminTelegramId(ctx.from?.id)) {
+        await ctx.reply("🎬 Send me a movie or series name and I'll find it for you.");
+        return;
+      }
       const video = ctx.message.video;
       const media = {
         file_id: video.file_id,
@@ -2692,6 +2648,10 @@ function cleanReleaseButtonLabel(rawText: string): string {
   bot.on("document", async (ctx) => {
     try {
       await ensureUser(ctx);
+      if (ctx.chat.type === "private" && !isAdminTelegramId(ctx.from?.id)) {
+        await ctx.reply("🎬 Send me a movie or series name and I'll find it for you.");
+        return;
+      }
       const media = extractVideoMedia(ctx.message);
       if (!media) {
         await ctx.reply("⚠️ Skipping file: Only video documents (.mp4, .mkv, etc) are supported for BusiMovie.");

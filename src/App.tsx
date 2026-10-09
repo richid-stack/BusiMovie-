@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import UserStorefront from "./pages/UserStorefront";
 import AdminDashboard from "./pages/AdminDashboard";
+import AdminGate from "./components/AdminGate";
 
 export default function App() {
   return (
@@ -22,7 +23,7 @@ export default function App() {
 
       <Routes>
         <Route path="/" element={<UserStorefront />} />
-        <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/admin" element={<AdminGate><AdminDashboard /></AdminGate>} />
       </Routes>
     </BrowserRouter>
   );
