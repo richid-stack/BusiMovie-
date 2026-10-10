@@ -1,7 +1,7 @@
 # BusiMovie — progress & handoff
 
 Branch: `claude/audit-fixes` (GitHub `richid-stack/BusiMovie-`). Plan: `implementation_plan.md` in the Claude project ("busimovie").
-Run: `npm i && npm run dev` · Tests: `npm test` (41 passing) · Typecheck: `npx tsc --noEmit` (clean).
+Run: `npm i && npm run dev` · Tests: `npm test` (73 passing) · Typecheck: `npx tsc --noEmit` (clean).
 Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to skip the splash).
 
 ## Done
@@ -25,14 +25,29 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 - New Netflix-style storefront in `src/storefront/*` + `src/pages/UserStorefront.tsx`: grain-gradient splash, rotating billboard, rows, Top 10 (only once view counts exist), My List, "pick up where you left off", detail popup (episodes / versions), search with "request this title", mobile bottom nav. Fonts are bundled (no Google Fonts).
 - Play opens the Telegram bot deep link (the site never exposes file URLs).
 
+**Phase 2 — one database** (commit 910daa8)
+- Firestore and every JSON mirror removed. SQLite/libsql (Turso in production) is the only store. `callback_cache` has a TTL and a purge; button/title caches persist with random keys; ephemeral 2-minute deletion only applies to delivered media.
+
+**Phase 3 — crawler engine** (commits up to b0b7114) — code in `src/crawler/`
+- `screen.ts` / `classify.ts`: the bot's current screen (text, buttons, file) is read and classified: results list, quality list, seasons, episodes, join-gate, throttled, empty, "still searching", file.
+- `navigator.ts`: bounded walk (≤7 steps, loop detection, pagination, waits for edited messages). Every click is confidence-gated; Back/ads/join links are never pressed; a wrong film or wrong file is rejected. When rules cannot decide, an AI advisor (`geminiAdvisor.ts`) may suggest a button; the suggestion is safety-checked and the file is verified anyway.
+- Join-gates: joins required channels (invite links, @names; never bots), presses "I joined", continues; gives up cleanly as `needs_admin`.
+- `gramTransport.ts`: event-driven (new + edited messages), callback answers, flood-wait handling, pacing; `vault.ts`: forwards to the vault and confirms the exact vault message id before indexing (no guessing).
+- `jobs.ts`: durable `crawl_jobs` queue (user > admin > cron, identical requests share one job, restart-safe) and `crawl_traces` (7-day retention, one step-by-step trace per bot attempt).
+- `engine.ts`: per-job failover across all suitable bots including acquisition; movies never use series bots and vice versa; rate-limited bots cool down.
+- `season.ts`: whole-season delivery — takes files as they arrive, numbers episodes from the file name, skips episodes already held, stops at the expected count or after the bot goes quiet; the bot then sends the full season in order with a real progress message.
+- `browse.ts`: season/episode lists with pagination and a 24h `series_blueprint` cache.
+- The bot (movie, episode, season), the web request route, the admin "fetch now" and the CSV/cron indexer all use this one engine. Old Quinson/dispatch code was deleted. Admin API: `GET /api/crawler/jobs`, `GET /api/crawler/jobs/:id` (job + traces).
+- Tested with scripted fake bots (Delta-like, Apple-like, Quinson-like, gates, empty, throttled, loops, wrong file, pagination). **Not yet verified against the real external bots** — first live run needs the Telegram session; check the trace of the first few jobs.
+- Not built (by choice, small value for now): "mirror mode" (re-skinning the external bot's options for the viewer) and persistent learned rules for the AI advisor. The old manual "Search Bot Playground" endpoints still use the legacy helpers.
+
 ## Next (see plan §6)
-1. **Phase 2** — Turso as the only store; drop Firestore + JSON mirrors; `callback_cache` TTL; close Firestore rules; ephemeral-delete allowlist (L12).
-2. **Phase 3** — crawler engine: screen classifier + gate handler, per-bot profiles, bounded navigator, Gemini fallback "eye", optional mirror mode, `crawl_jobs` queue with failover, Quinson blueprint + pagination, full-season delivery "as they arrive", trace viewer.
-3. **Phase 4–5** — finish storefront (views counter for Top 10, real backdrops) and redesign the admin (3157-line AdminDashboard).
-4. **Phase 6** — single lockfile, PWA name/icons (still "Telegram Movie Vault"), README.
-5. Three original wordmark options for Richie to pick from (current one is a placeholder).
+1. **Phase 4–5** — finish storefront (views counter for Top 10, real backdrops) and redesign the admin (3157-line AdminDashboard), including a crawl-jobs / trace viewer screen (API already exists).
+2. **Phase 6** — single lockfile, PWA name/icons (still "Telegram Movie Vault"), README, `GEMINI_MODEL` env.
+3. Three original wordmark options for Richie to pick from (current one is a placeholder).
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
 - Set secrets in AI Studio: `ADMIN_PASSWORD`, `ADMIN_TELEGRAM_IDS`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `TELEGRAM_USER_SESSION` (the session is no longer mirrored anywhere).
-- Close the Firestore rules only after Turso is configured (boot-time restore still reads Firestore until Phase 2).
+- Firestore is no longer used at all; you can delete the Firestore database / rules in the Firebase console.
+- Optional: `GEMINI_API_KEY` (and `GEMINI_MODEL`) enables the AI advisor for unfamiliar bot screens.
