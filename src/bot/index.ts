@@ -1,3 +1,4 @@
+import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import fs from "fs";
 import path from "path";
 import { Telegraf, Markup, Telegram } from "telegraf";
@@ -295,77 +296,21 @@ export function parseMediaDetails(rawFilename?: string, rawCaption?: string): {
     }
   }
 
-  // Strip emojis and common junk symbols
-  let clean = relevantLine.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{2300}-\u{23FF}📌🎬🍿✅⚡⭐]/gu, '').trim();
-  clean = clean.replace(/\.[a-zA-Z0-9]{2,4}$/, ""); // remove extension
-
-  // Strip promo channel phrases
-  clean = clean.replace(/join\s+@[\w_]+/gi, "").trim();
-  clean = clean.replace(/@[\w_]+/g, "").trim();
-  clean = clean.replace(/^\[[A-Za-z0-9 _-]+\]\s*/, "");
-  clean = clean.replace(/^(fc|psa|hevc|webrip|bluray|x265|x264)[_.-]+/i, "");
-
-  // Special check for S.W.A.T. / SWAT
-  if (/^s\.w\.a\.t/i.test(clean) || /^swat/i.test(clean) || /^s w a t/i.test(clean)) {
-    const seMatch = clean.match(/s(\d{1,2})e(\d{1,3})/i) || clean.match(/season\s*(\d{1,2})\s*episode\s*(\d{1,3})/i);
-    const qMatch = clean.match(/\b(2160p|4K|1080p|720p|480p|HD)\b/i);
-    return {
-      title: "S.W.A.T.",
-      year: "2017",
-      quality: qMatch ? qMatch[1].toUpperCase() : "720P",
-      season: seMatch ? parseInt(seMatch[1], 10) : undefined,
-      episode: seMatch ? parseInt(seMatch[2], 10) : undefined
-    };
+  // Strip emojis / @handles, then hand over to the single canonical parser.
+  let clean = relevantLine.replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{2300}-\u{23FF}]/gu, "").trim();
+  clean = clean.replace(/join\s+@[\w_]+/gi, "").replace(/@[\w_]+/g, "").trim();
+  const parsed = parseMediaTitleAndSeriesInfo(clean);
+  let title = parsed.cleanTitle;
+  if ((!title || title.length < 2) && filename && filename !== sourceText) {
+    return parseMediaDetails(filename, "");
   }
-
-  // Convert underscores and dots to spaces to allow regex word boundaries \b to work properly
-  const spaced = clean.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
-
-  // Extract Season & Episode
-  let season: number | undefined;
-  let episode: number | undefined;
-  const seMatch = spaced.match(/\b(?:s(\d{1,2})\s*e(\d{1,3})|season\s*(\d{1,2})\s*episode\s*(\d{1,3}))\b/i);
-  if (seMatch) {
-    season = parseInt(seMatch[1] || seMatch[3], 10);
-    episode = parseInt(seMatch[2] || seMatch[4], 10);
-  }
-
-  // Extract quality
-  let quality = "1080p";
-  const qualityMatch = spaced.match(/\b(2160p|4K|1080p|720p|480p|HD|HDR|UHD)\b/i);
-  if (qualityMatch) {
-    quality = qualityMatch[1].toUpperCase();
-  }
-
-  // Extract year
-  let year = "";
-  const yearMatch = spaced.match(/\b(19\d{2}|20\d{2})\b/);
-  if (yearMatch) {
-    year = yearMatch[1];
-  }
-
-  // Clean title: take portion before season/episode, year, or quality
-  let cutIndex = spaced.length;
-  if (seMatch && seMatch.index !== undefined && seMatch.index > 0) {
-    cutIndex = Math.min(cutIndex, seMatch.index);
-  }
-  if (yearMatch && yearMatch.index !== undefined && yearMatch.index > 0) {
-    cutIndex = Math.min(cutIndex, yearMatch.index);
-  }
-  if (qualityMatch && qualityMatch.index !== undefined && qualityMatch.index > 0) {
-    cutIndex = Math.min(cutIndex, qualityMatch.index);
-  }
-
-  let title = spaced.substring(0, cutIndex).replace(/\b(WEBRip|BluRay|BRRip|x264|x265|HEVC|AAC|HDR|HD|HQ|RMSTRD|NF|AMZN|PSA)\b/gi, "").trim();
-  if (!title || title.toLowerCase() === "join" || title.length < 2) {
-    // If title was mangled by promo text, fallback strictly to rawFilename
-    if (filename && filename !== sourceText) {
-      return parseMediaDetails(filename, "");
-    }
-    title = spaced || "Untitled Movie";
-  }
-
-  return { title, year, quality, season, episode };
+  return {
+    title: title || "Untitled Movie",
+    year: parsed.year || "",
+    quality: parsed.quality || "1080p",
+    season: parsed.isSeries ? parsed.season : undefined,
+    episode: parsed.isSeries ? parsed.episode : undefined
+  };
 }
 
 // Helper to extract media payload from any Telegram message or channel post
@@ -2002,6 +1947,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
   // Level 2: Series Season Selector (Direct Quinson UX with Merged Catalog)
   bot.action(/^ser_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {}); // answer first, before any slow lookup
     await ensureUser(ctx);
     const showKey = ctx.match[1];
     const seriesTitle = await resolveShowTitle(showKey);
@@ -2027,10 +1973,9 @@ function cleanReleaseButtonLabel(rawText: string): string {
     }
 
     const merged = Array.from(new Set([...dbSeasons, ...qSeasons])).sort((a, b) => a - b);
-    let seasons = merged.length > 0 ? merged : (dbSeasons.length > 0 ? dbSeasons : [1]);
+    const seasons = merged; // no invented Season 1: an empty list falls through to the request prompt below
 
     if (seasons.length === 0) {
-      await ctx.answerCbQuery();
       const qKey = getQueryKey(seriesTitle);
       const text = `You selected the series <b>${escapeHtml(seriesTitle)}</b>.\n\n⚠️ <i>This series is currently being acquired for BusiMovie.</i>\n\nWould you like to request this title?`;
       const kb = Markup.inlineKeyboard([
@@ -2050,9 +1995,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
       return;
     }
 
-    await ctx.answerCbQuery();
-
-    // Build 2-column season button grid (Quinson style)
+    // Build 2-column season button grid
     const seasonButtons: any[] = [];
     let currentRow: any[] = [];
 
@@ -2083,6 +2026,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
   // Level 3: Episode Browser with True Hybrid Availability
   bot.action(/^eps_(.+)_(\d+)_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {}); // answer first: Telegram expires callback queries after ~15s
     await ensureUser(ctx);
     const showKey = ctx.match[1];
     const seasonNum = parseInt(ctx.match[2], 10);
@@ -2122,12 +2066,16 @@ function cleanReleaseButtonLabel(rawText: string): string {
       allEpNums.add(qep.episodeNum);
     }
 
-    // Fallback minimum 8 episodes if both empty
+    // No invented episodes: if we genuinely have none, say so.
     if (allEpNums.size === 0) {
-      for (let i = 1; i <= 8; i++) allEpNums.add(i);
+      const emptyMsg = `📺 <b>${escapeHtml(seriesTitle)} - Season ${seasonNum}</b>\nWe couldn't load the episode list right now. Please try again in a moment.`;
+      const kb = Markup.inlineKeyboard([[Markup.button.callback("◀️ Back to Seasons", `ser_${showKey}`)]]);
+      try {
+        if ((ctx.callbackQuery?.message as any)?.photo) await ctx.editMessageCaption(emptyMsg, { parse_mode: "HTML", ...kb });
+        else await ctx.editMessageText(emptyMsg, { parse_mode: "HTML", ...kb });
+      } catch { await ctx.reply(emptyMsg, { parse_mode: "HTML", ...kb }); }
+      return;
     }
-
-    await ctx.answerCbQuery();
 
     const sortedEpNums = Array.from(allEpNums).sort((a, b) => a - b);
     const pageSize = 8;
@@ -2140,7 +2088,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
     for (const epNum of pageEpNums) {
       const readyFile = dbEpMap.get(epNum);
       const epLabel = epNum < 10 ? `E0${epNum}` : `E${epNum}`;
-      const isRealReady = readyFile && readyFile.telegram_message_id && Number(readyFile.telegram_message_id) > 0;
+      const isRealReady = Boolean(readyFile && readyFile.telegram_file_id);
 
       if (isRealReady) {
         const qText = readyFile.quality || "HD";

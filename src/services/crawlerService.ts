@@ -2,7 +2,7 @@ import stringSimilarity from "string-similarity";
 import { addMediaFile, logChannelEvent, markRequestsFulfilled, db, getSetting, setSetting, deleteSetting } from "../db/index.js";
 import { searchMovies } from "./movieProvider.js";
 import { getOfficialTrailer } from "./trailerService.js";
-import { parseMediaTitleAndSeriesInfo } from "./seriesParser.js";
+import { parseMediaTitleAndSeriesInfo, normalizeQuality } from "./seriesParser.js";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import axios from "axios";
@@ -191,12 +191,8 @@ export async function initCrawlerService() {
       }
     }
 
-    // Enforce active priority bot structure: @Apple_moviebot (1), @iPapkornDeltaBot (2), @iPapkornEzPzBot (3)
-    await db.execute("UPDATE search_bots SET status = 'inactive' WHERE LOWER(bot_username) NOT IN ('@apple_moviebot', '@ipapkorndeltabot', '@ipapkorn_deltabot', '@ipapkornezpzbot')");
-    await db.execute("UPDATE search_bots SET status = 'active', priority = 1 WHERE LOWER(bot_username) = '@apple_moviebot'");
-    await db.execute("UPDATE search_bots SET status = 'active', priority = 2 WHERE LOWER(bot_username) IN ('@ipapkorndeltabot', '@ipapkorn_deltabot')");
-    await db.execute("UPDATE search_bots SET status = 'active', priority = 3 WHERE LOWER(bot_username) = '@ipapkornezpzbot'");
-
+    // Default priorities apply only to bots the admin has not touched: we never force a bot
+    // inactive or reorder it on boot (admin choices in the dashboard are authoritative).
     // Reload search bots
     const botRows = (await db.execute("SELECT * FROM search_bots ORDER BY priority ASC, id ASC")).rows;
     searchBots = botRows as unknown as SearchBot[];
@@ -1084,7 +1080,7 @@ export async function testQuerySearchBot(botUsername: string, query: string): Pr
         if (replyMsg.replyMarkup?.rows[bestTitleBtn.row]?.buttons[bestTitleBtn.col]) {
           await replyMsg.click(replyMsg.replyMarkup.rows[bestTitleBtn.row].buttons[bestTitleBtn.col]);
         } else {
-          await replyMsg.click(bestTitleBtn.row);
+          throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
         }
 
         // Wait up to 6 seconds for step 2 (quality list or new message)
@@ -1209,12 +1205,16 @@ export interface CandidateButton {
 export function isBackOrNavButton(text: string): boolean {
   if (!text) return true;
   const t = text.trim().toLowerCase();
-  if (/^\d+\/\d+$/.test(t)) return true; // pagination e.g. 1/5
-  if (/^(<<|>>|<|>|◀️|▶️|⏪|⏩|⬅️|➡️|<<\s*prev|next\s*>>)$/i.test(t)) return true;
-  if (/\b(page\s*\d+|p\.\d+|\d+\s*of\s*\d+)\b/i.test(t)) return true;
-  if (/\b(back|«\s*back|🔙|return|prev|previous|next|close|cancel|help|faq|support|main menu|home|menu|rules)\b/i.test(t)) return true;
-  if (/\b(join\s+(?:our|the|this|private)?\s*(?:telegram\s*)?(?:channel|group|vip)|join\s*@[\w_]+|subscribe|telegram\s*@[\w_]+|follow\s*@[\w_]+)\b/i.test(t)) return true;
-  if (/\b(crypto|earn\s*money|promo|ads?|vpn|download\s*app|direct\s*link|sponsor)\b/i.test(t)) return true;
+  if (!t) return true;
+  if (/^\d+\s*\/\s*\d+$/.test(t)) return true; // pagination e.g. 1/5
+  if (/^[\W_]*(?:<<|>>|<|>|‹|›|«|»|◀️?|▶️?|⏪|⏩|⬅️?|➡️?)[\W_]*(?:prev(?:ious)?|next|back)?[\W_]*$/i.test(t)) return true;
+  if (/\b(?:page\s*\d+|p\.\d+|\d+\s*of\s*\d+)\b/i.test(t) && t.length < 16) return true;
+  // Navigation words only count when they ARE the button, never when they are part of a film title
+  // ("Home Alone", "Return of the Jedi", "Close Encounters", "Ad Astra" must stay selectable).
+  if (/^[\W_]*(?:back|return|prev(?:ious)?|next|close|cancel|help|faq|support|main\s*menu|home|menu|rules|refresh|more|start\s*over|new\s*search)(?:\s+(?:to|page|menu|results?|search|list))*[\W_]*$/i.test(t)) return true;
+  if (/\b(?:join\s+(?:our|the|this|private)\s*(?:telegram\s*)?(?:channel|group|vip)|join\s*@[\w_]+|telegram\s*@[\w_]+|follow\s*@[\w_]+)\b/i.test(t) || /^[\W_]*subscribe\b/i.test(t)) return true;
+  if (/\b(?:crypto|earn\s*money|vpn|download\s*app|sponsor(?:ed)?)\b/i.test(t)) return true;
+  if (/^[\W_]*(?:ads?|promo|direct\s*link)[\W_]*$/i.test(t)) return true;
   return false;
 }
 
@@ -1238,12 +1238,18 @@ export function selectBestMatchingButton(
     return true;
   });
 
-  if (validButtons.length === 0) return buttons.find(b => !isBackOrNavButton(b.text)) || buttons[0] || null;
+  // Never fall back to "whatever is first" — that is how wrong films get downloaded.
+  if (validButtons.length === 0) return null;
 
   // Helper to extract sequel / part number (e.g. "Part 2", "2", "II", "Chapter 2")
   const cleanTarget = targetTitle.toLowerCase();
   const getSequelNum = (str: string): number | null => {
-    const s = str.toLowerCase();
+    // Sizes ("2.1 GB"), resolutions, episode tags and years are not sequel numbers
+    const s = str.toLowerCase()
+      .replace(/\d+(?:[.,]\d+)?\s*(?:gb|mb|kb|tb)\b/g, " ")
+      .replace(/\b(?:2160|1080|720|480|360)p?\b/g, " ")
+      .replace(/\bs\d{1,2}\s*e\d{1,3}\b/g, " ")
+      .replace(/\b(?:19|20)\d{2}\b/g, " ");
     if (/\b(part\s*4|part\s*iv|chapter\s*4|vol\s*4|\b4\b|four)\b/i.test(s)) return 4;
     if (/\b(part\s*3|part\s*iii|chapter\s*3|vol\s*3|\b3\b|three)\b/i.test(s)) return 3;
     if (/\b(part\s*2|part\s*ii|chapter\s*2|vol\s*2|\b2\b|two)\b/i.test(s) && !/\b(20\d\d|19\d\d)\b/.test(s)) return 2;
@@ -1340,7 +1346,21 @@ export function selectBestMatchingButton(
     }
   }
 
-  return bestButton || validButtons[0] || null;
+  if (!bestButton) return null;
+
+  // Confidence gate: the winner must actually look like the requested title, unless every
+  // candidate is a bare quality/size button ("1080p • 2.1 GB") where there is no title to compare.
+  const bestNorm = bestButton.text.toLowerCase().replace(/[\s._\-:,'&/()]+/g, " ");
+  const isBareDownload = /^[\W\d]*(?:(?:2160p|1080p|720p|480p|4k|uhd|hd|sd|gb|mb|kb|mkv|mp4|x26[45]|hevc|web[- ]?dl|bluray|download|get|stream|watch)[\W\d]*)+$/i.test(bestNorm);
+  if (!isBareDownload) {
+    const hits = targetWords.filter(tw => bestNorm.includes(tw)).length;
+    const wordRatio = targetWords.length ? hits / targetWords.length : 0;
+    let sim = 0;
+    try { sim = stringSimilarity.compareTwoStrings(cleanTarget, bestNorm); } catch (_) {}
+    if (wordRatio < 0.5 && sim < 0.35) return null;
+    if (highestScore < 0) return null;
+  }
+  return bestButton;
 }
 
 /**
@@ -1394,10 +1414,10 @@ export async function fetchAndForwardBotMedia(params: {
         if (btn) {
           await msg.click(btn);
         } else {
-          await msg.click(params.buttonRow);
+          throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
         }
       } else {
-        await msg.click(params.buttonRow);
+        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
       }
     } catch (clickErr: any) {
       console.warn("Button click error:", clickErr.message);
@@ -1532,17 +1552,8 @@ export async function fetchAndForwardBotMedia(params: {
     }
   }
 
-  // Bulletproof fallback: get latest message from channel to ensure valid ID
-  if (!realChannelMsgId) {
-    try {
-      const latestMsgs = await client.getMessages(vaultEntity, { limit: 1 });
-      if (latestMsgs && latestMsgs[0]?.id) {
-        realChannelMsgId = String(latestMsgs[0].id);
-      }
-    } catch (e: any) {
-      console.warn("Could not retrieve latest vault message ID:", e?.message);
-    }
-  }
+  // No guessing: if the forward result carried no message id we leave it empty rather than
+  // grabbing "the latest message" (which can belong to a different upload).
 
   // Ingest media to storage channel (our bot will deliver to user cleanly without external peer tags)
   let deliveredDirectly = false;
@@ -1685,7 +1696,7 @@ export async function fetchSeriesFromQuinson(params: {
     if (step1Reply.replyMarkup?.rows[bestSeriesBtn.row]?.buttons[bestSeriesBtn.col]) {
       await step1Reply.click(step1Reply.replyMarkup.rows[bestSeriesBtn.row].buttons[bestSeriesBtn.col]);
     } else {
-      await step1Reply.click(bestSeriesBtn.row);
+      throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
     }
 
     // Wait up to 5s for Season grid
@@ -1726,7 +1737,7 @@ export async function fetchSeriesFromQuinson(params: {
     if (seasonReply.replyMarkup?.rows[(targetSeasonBtn as any).row]?.buttons[(targetSeasonBtn as any).col]) {
       await seasonReply.click(seasonReply.replyMarkup.rows[(targetSeasonBtn as any).row].buttons[(targetSeasonBtn as any).col]);
     } else {
-      await seasonReply.click((targetSeasonBtn as any).row);
+      throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
     }
 
     // Wait up to 5s for Episode grid
@@ -1788,26 +1799,17 @@ export async function fetchSeriesFromQuinson(params: {
       }
 
       if (!targetEpBtn) {
-        // Fallback to first episode button
-        epReply.replyMarkup.rows.forEach((row: any, rIdx: number) => {
-          row.buttons.forEach((btn: any, cIdx: number) => {
-            const dataStr = btn.data ? (Buffer.isBuffer(btn.data) ? btn.data.toString("utf8") : String(btn.data)) : "";
-            if (!targetEpBtn && !isBackOrNavButton(btn.text) && (dataStr.includes("epsel_") || btn.text.includes("E01") || btn.text.includes("E1") || /\bE\d+/i.test(btn.text))) {
-              targetEpBtn = { text: btn.text, row: rIdx, col: cIdx, data: dataStr };
-            }
-          });
-        });
-      }
-
-      if (!targetEpBtn) {
-        targetEpBtn = { text: "Episode 1", row: 0, col: 0 };
+        // Never substitute a different episode: a wrong file is worse than an honest "not available".
+        throw new Error(params.episodeNum
+          ? `Episode ${params.episodeNum} was not found on the series bot's episode list.`
+          : "No episode was specified and none could be matched on the bot's screen.");
       }
 
       console.log(`[QuinsonEngine] Clicking episode button: "${targetEpBtn.text}" (data: ${targetEpBtn.data})...`);
       if (epReply.replyMarkup?.rows[targetEpBtn.row]?.buttons[targetEpBtn.col]) {
         await epReply.click(epReply.replyMarkup.rows[targetEpBtn.row].buttons[targetEpBtn.col]);
       } else {
-        await epReply.click(targetEpBtn.row);
+        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
       }
     }
 
@@ -1875,16 +1877,6 @@ export async function fetchSeriesFromQuinson(params: {
             if (!realChannelMsgId && (fwd as any).id) {
               realChannelMsgId = String((fwd as any).id);
             }
-          }
-
-          // Verified backup lookup: fetch latest message from vault channel to guarantee genuine ID
-          if (!realChannelMsgId) {
-            try {
-              const latestVault = await client.getMessages(vaultEntity, { limit: 1 });
-              if (latestVault && latestVault[0]?.id) {
-                realChannelMsgId = String(latestVault[0].id);
-              }
-            } catch (_) {}
           }
 
           const fnAttr = ((m.document as any)?.attributes || []).find((a: any) => a.className === "DocumentAttributeFilename") as any;
@@ -1987,7 +1979,7 @@ export async function getQuinsonSeriesSeasons(seriesTitle: string): Promise<numb
       if ((step1Reply.replyMarkup as any)?.rows[bestSeriesBtn.row]?.buttons[bestSeriesBtn.col]) {
         await step1Reply.click((step1Reply.replyMarkup as any).rows[bestSeriesBtn.row].buttons[bestSeriesBtn.col]);
       } else {
-        await step1Reply.click(bestSeriesBtn.row);
+        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
       }
 
       let seasonReply: any = null;
@@ -2070,7 +2062,7 @@ export async function getQuinsonSeasonEpisodes(seriesTitle: string, seasonNum: n
       if ((step1Reply.replyMarkup as any)?.rows[bestSeriesBtn.row]?.buttons[bestSeriesBtn.col]) {
         await step1Reply.click((step1Reply.replyMarkup as any).rows[bestSeriesBtn.row].buttons[bestSeriesBtn.col]);
       } else {
-        await step1Reply.click(bestSeriesBtn.row);
+        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
       }
 
       let seasonReply: any = null;
@@ -2100,7 +2092,7 @@ export async function getQuinsonSeasonEpisodes(seriesTitle: string, seasonNum: n
       if ((seasonReply.replyMarkup as any)?.rows[(targetSeasonBtn as any).row]?.buttons[(targetSeasonBtn as any).col]) {
         await seasonReply.click((seasonReply.replyMarkup as any).rows[(targetSeasonBtn as any).row].buttons[(targetSeasonBtn as any).col]);
       } else {
-        await seasonReply.click((targetSeasonBtn as any).row);
+        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
       }
 
       let epReply: any = null;
@@ -2337,8 +2329,8 @@ let cronConfig: CronConfig = {
 let cronTimerHandle: NodeJS.Timeout | null = null;
 
 /**
- * Clean & normalize messy movie release titles, stripping promos, channel tags,
- * release groups, resolutions, and video extensions.
+ * Clean & normalize messy movie release titles. Delegates to the single canonical parser
+ * (seriesParser.ts) so the bot, the database and the batch indexer can never disagree.
  */
 export function cleanMovieReleaseTitle(rawInput: string): {
   cleanTitle: string;
@@ -2350,69 +2342,33 @@ export function cleanMovieReleaseTitle(rawInput: string): {
   let text = (rawInput || "").trim();
   if (!text) return { cleanTitle: "" };
 
-  // Remove common URL prefixes and file extensions
-  text = text.replace(/\.(mkv|mp4|avi|mov|webm|flv|ts)$/i, "");
+  // URLs, channel handles and promo tags never belong in a title
   text = text.replace(/https?:\/\/\S+/gi, "");
-
-  // Remove channel handles and promotional tags
   text = text.replace(/@\w+/g, "");
-  text = text.replace(/\[(?:YTS(?:\.MX)?|Pahe(?:\.in)?|Apple_Movies\w*|F5_FILMS|RARBG|TGx|PSA|GalaxyTV|EZTV|TorrentGalaxy)\]/gi, "");
   text = text.replace(/(?:Join\s*@|Follow\s*@|Telegram\s*@|Downloaded\s*from\s*|Shared\s*by\s*)[^\s]+/gi, "");
+  text = text.trim();
+  if (!text) return { cleanTitle: "" };
 
-  // Extract Season & Episode if series
-  let season: number | undefined;
-  let episode: number | undefined;
-  const sMatch = text.match(/[Ss](\d{1,2})[Ee](\d{1,3})/i) || text.match(/Season\s*(\d{1,2})/i);
-  if (sMatch) {
-    season = parseInt(sMatch[1], 10);
-    const epMatch = text.match(/[Ee](\d{1,3})/i) || text.match(/Episode\s*(\d{1,3})/i);
-    if (epMatch) episode = parseInt(epMatch[1], 10);
-  }
-
-  // Extract Year (1900 - 2099)
-  let year: string | undefined;
-  const yearMatch = text.match(/\b(19\d{2}|20\d{2})\b/);
-  if (yearMatch) {
-    year = yearMatch[1];
-  }
-
-  // Extract Quality
-  let quality: string | undefined;
-  if (/2160p|4k|uhd/i.test(text)) quality = "4K";
-  else if (/1080p/i.test(text)) quality = "1080p";
-  else if (/720p/i.test(text)) quality = "720p";
-  else if (/480p/i.test(text)) quality = "480p";
-  else quality = "1080p";
-
-  // Strip technical release descriptors
-  text = text.replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdrip|web-dl|webrip|bluray|brrip|dvdrip|hdtv|x264|x265|hevc|aac|ac3|dts|ddp5\.1|10bit|remux|extended|unrated|directors\.cut|repack)\b/gi, " ");
-  
-  // Strip punctuation artifacts (brackets, dots, underscores, hyphens)
-  text = text.replace(/[\[\]\(\)\{\}_.-]/g, " ");
-  
-  // If year was found, truncate any text trailing after year
-  if (year) {
-    const yearIdx = text.indexOf(year);
-    if (yearIdx > 0) {
-      text = text.substring(0, yearIdx);
-    }
-  }
-
-  // Remove duplicate spaces
-  text = text.replace(/\s+/g, " ").trim();
-
+  const parsed = parseMediaTitleAndSeriesInfo(text);
   return {
-    cleanTitle: text || rawInput.trim(),
-    year,
-    quality,
-    season,
-    episode
+    cleanTitle: parsed.cleanTitle || text,
+    year: parsed.year,
+    quality: parsed.quality || "1080p",
+    season: parsed.isSeries ? parsed.season : undefined,
+    episode: parsed.isSeries ? parsed.episode : undefined
   };
 }
 
+const LINE_HEADER_WORDS = /^(rank|id|no\.?|index|s\.?no\.?|row|#|movie|movies|title|film|year|quality|format|name)$/i;
+const LINE_INDEX_CELL = /^(?:row\s*\d+|\d{1,3}|#\s*\d+|no\.?\s*\d+|index\s*\d+|item\s*\d+)$/i;
+const LINE_YEAR_CELL = /^(?:19|20)\d{2}$/;
+const LINE_QUALITY_CELL = /^(4k|2160p|1080p|720p|480p|hd|sd|uhd|bluray|web-dl)$/i;
+
 /**
- * Robust line parser supporting Markdown tables, Markdown lists, Numbered lists,
- * TSV, CSV, and plain movie name lists. Intelligently skips rank/index/row columns.
+ * Robust line parser for Markdown tables, lists, numbered lists, TSV, CSV and plain title lists.
+ * Commas are only treated as column separators when every other cell is a year, a quality or a row
+ * index — so "Hello, Dolly!" stays one title. Digit-only titles (300, 1917) are kept when they are
+ * the whole line.
  */
 export function extractLineMovieInfo(line: string): {
   rawTitle: string;
@@ -2420,87 +2376,70 @@ export function extractLineMovieInfo(line: string): {
   year?: string;
   quality: string;
 } {
+  const EMPTY = { rawTitle: "", cleanTitle: "", quality: "1080p" };
   let text = (line || "").trim();
-  if (!text) return { rawTitle: "", cleanTitle: "", quality: "1080p" };
+  if (!text) return EMPTY;
 
-  // Skip Markdown table divider lines (e.g. |---|---|)
-  if (/^\|?[\s\-:|]+\|?$/.test(text)) {
-    return { rawTitle: "", cleanTitle: "", quality: "1080p" };
-  }
+  // Markdown table divider lines (|---|---|)
+  if (/^\|?[\s\-:|]+\|?$/.test(text)) return EMPTY;
 
-  // Helpers to identify row index numbers and header labels
-  const isRowIndexOrHeader = (val: string) => {
-    const v = val.trim().toLowerCase();
-    if (!v) return true;
-    if (/^(rank|id|no\.?|index|s\.?no\.?|row|#|movie|title|film|year|quality|format|name)$/i.test(v)) return true;
-    if (/^(?:row\s*\d+|\d+|#\s*\d+|no\.?\s*\d+|index\s*\d+|item\s*\d+)$/i.test(v)) return true;
-    return false;
+  // A header line is one made ONLY of header words ("title,year,quality" / "| # | Movie | Year |")
+  const headerCells = text.split(/[|,\t]/).map(c => c.trim()).filter(Boolean);
+  if (headerCells.length > 0 && headerCells.every(c => LINE_HEADER_WORDS.test(c))) return EMPTY;
+
+  const fromCells = (cells: string[]) => {
+    const isMeta = (c: string) => LINE_INDEX_CELL.test(c) || LINE_YEAR_CELL.test(c) || LINE_QUALITY_CELL.test(c) || LINE_HEADER_WORDS.test(c);
+    const titleCell = cells.find(c => !isMeta(c));
+    if (!titleCell) return null;
+    const yearCell = cells.find(c => c !== titleCell && LINE_YEAR_CELL.test(c));
+    const qualityCell = cells.find(c => c !== titleCell && LINE_QUALITY_CELL.test(c));
+    return { titleCell, yearCell, qualityCell, others: cells.filter(c => c !== titleCell && !isMeta(c)) };
   };
 
-  const isYear = (val: string) => /^(19\d{2}|20\d{2})$/.test(val.trim());
-  const isQuality = (val: string) => /^(4k|2160p|1080p|720p|480p|hd|sd|uhd|bluray|web-dl)$/i.test(val.trim());
+  let rawTitle = "";
+  let cellYear: string | undefined;
+  let cellQuality: string | undefined;
 
-  // Handle Markdown table row format e.g. "| 1 | Inception | 2010 | 1080p |"
   if (text.startsWith("|") && text.endsWith("|")) {
     const cells = text.split("|").map(c => c.trim()).filter(Boolean);
-    if (cells.length > 0) {
-      const titleCell = cells.find(c => !isRowIndexOrHeader(c) && !isYear(c) && !isQuality(c)) || "";
-      const yearCell = cells.find(c => c !== titleCell && isYear(c));
-      const qualityCell = cells.find(c => c !== titleCell && isQuality(c));
-      const cleaned = cleanMovieReleaseTitle(titleCell);
-      return {
-        rawTitle: titleCell,
-        cleanTitle: cleaned.cleanTitle,
-        year: yearCell || cleaned.year,
-        quality: qualityCell || cleaned.quality || "1080p"
-      };
-    }
-  }
+    const r = fromCells(cells);
+    if (!r) return EMPTY;
+    rawTitle = r.titleCell; cellYear = r.yearCell; cellQuality = r.qualityCell;
+  } else {
+    // Leading row prefixes: "Row 19:", "19. ", "19) ", "No. 19: ", "#19 ", bullets, checkboxes
+    text = text.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d{1,3}[\.\)\-:]\s+|[-*•]\s*|\[[\sxX]\]\s*)/i, "").trim();
+    // Markdown links and emphasis
+    text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1").replace(/[\*~`]/g, "").trim();
+    rawTitle = text;
 
-  // Remove leading row prefixes like "Row 19:", "19. ", "19) ", "No. 19: ", "#19 "
-  text = text.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d+[\.\)\-:]\s*|[-*•]\s*|\[[\sxX]\]\s*)/gi, "").trim();
-
-  // Remove markdown links e.g. "[Inception](https://...)" -> "Inception"
-  text = text.replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1");
-  text = text.replace(/[\*_~`]/g, "");
-
-  let rawTitle = text;
-  let targetYear: string | undefined;
-  let targetQuality = "1080p";
-
-  // Check for CSV or TSV columns
-  if (text.includes(",") || text.includes("\t")) {
-    const delim = text.includes("\t") ? "\t" : ",";
-    const parts = text.split(delim).map(c => c.replace(/^["']|["']$/g, "").trim()).filter(Boolean);
-    
-    // Find the actual movie title column (first column that is not a row index/number, year, or quality)
-    const titlePart = parts.find(p => !isRowIndexOrHeader(p) && !isYear(p) && !isQuality(p));
-    if (titlePart) {
-      rawTitle = titlePart;
-    } else {
-      rawTitle = "";
-    }
-
-    for (const part of parts) {
-      if (part !== rawTitle) {
-        if (isYear(part)) targetYear = part;
-        else if (isQuality(part)) targetQuality = part;
+    const delim = text.includes("\t") ? "\t" : text.includes(",") ? "," : null;
+    if (delim) {
+      const cells = text.split(delim).map(c => c.replace(/^["']|["']$/g, "").trim()).filter(Boolean);
+      const r = fromCells(cells);
+      if (!r) return EMPTY; // every cell is an index/year/quality/header — nothing to search for
+      // Only a real column layout if no second free-text cell exists (otherwise the comma is part of the title)
+      if (r && cells.length > 1 && r.others.length === 0) {
+        rawTitle = r.titleCell; cellYear = r.yearCell; cellQuality = r.qualityCell;
+      } else if (delim === "\t" && r) {
+        rawTitle = r.titleCell; cellYear = r.yearCell; cellQuality = r.qualityCell;
       }
     }
   }
 
-  const cleaned = cleanMovieReleaseTitle(rawTitle);
+  rawTitle = rawTitle.trim();
+  if (!rawTitle) return EMPTY;
 
-  // Safety check: if cleanTitle is pure numbers, row label, or header keyword, reject it!
-  if (!cleaned.cleanTitle || isRowIndexOrHeader(cleaned.cleanTitle) || /^\d+$/.test(cleaned.cleanTitle)) {
-    return { rawTitle: "", cleanTitle: "", quality: "1080p" };
-  }
+  const cleaned = cleanMovieReleaseTitle(rawTitle);
+  const wholeLine = (line || "").trim();
+  // A bare number is only a title when it IS the whole line (e.g. "300", "1917"); never when it came from a column or row index.
+  if (!cleaned.cleanTitle) return EMPTY;
+  if (/^\d+$/.test(cleaned.cleanTitle) && cleaned.cleanTitle !== wholeLine) return EMPTY;
 
   return {
-    rawTitle: rawTitle.trim(),
+    rawTitle,
     cleanTitle: cleaned.cleanTitle,
-    year: targetYear || cleaned.year,
-    quality: cleaned.quality || targetQuality || "1080p"
+    year: cellYear || cleaned.year,
+    quality: normalizeQuality(cellQuality || cleaned.quality, "1080p")
   };
 }
 
@@ -2547,51 +2486,41 @@ export function normalizeTitleFuzzy(title: string): string {
   return t.replace(/\s+/g, " ").trim();
 }
 
+export interface VaultIndexRow { movie_title: string; year: string | null; quality: string | null }
+
+/** Loads a light snapshot of the vault once so a whole CSV can be de-duplicated without N full-table scans. */
+export async function loadVaultIndex(): Promise<VaultIndexRow[]> {
+  const rows = (await db.execute("SELECT movie_title, year, quality FROM media_files WHERE season IS NULL")).rows;
+  return rows as unknown as VaultIndexRow[];
+}
+
 /**
- * Check if a movie is already present in the Vault.
- * Strict deduplication: If ANY version exists in the Vault (720P, 1080P, 4K, 480P, or HD),
- * it is treated as a duplicate so external bots are not re-queried redundantly.
+ * Check if a movie is already present in the Vault. ANY quality counts as a duplicate, but the
+ * release year is respected: "Dune (1984)" does not block "Dune (2021)".
  */
-export async function checkVaultDuplicate(cleanTitle: string, requestedQuality: string = "any"): Promise<{
-  isDuplicate: boolean;
-  reason?: string;
-  existingQualities: string[];
-}> {
+export async function checkVaultDuplicate(
+  cleanTitle: string,
+  _requestedQuality: string = "any",
+  year?: string,
+  index?: VaultIndexRow[]
+): Promise<{ isDuplicate: boolean; reason?: string; existingQualities: string[] }> {
   if (!cleanTitle) return { isDuplicate: false, existingQualities: [] };
 
   try {
-    // 1. Direct query matching exact title in SQLite
-    const directRows = (await db.execute({
-      sql: `SELECT id, movie_title, quality, file_size FROM media_files WHERE LOWER(TRIM(movie_title)) = LOWER(TRIM(?))`,
-      args: [cleanTitle]
-    })).rows;
+    const all = index ?? await loadVaultIndex();
+    const targetNorm = normalizeTitleFuzzy(cleanTitle);
+    if (!targetNorm || targetNorm.length < 2) return { isDuplicate: false, existingQualities: [] };
 
-    let matchedRows = [...directRows];
+    const matched = all.filter(f => {
+      if (normalizeTitleFuzzy(f.movie_title || "") !== targetNorm) return false;
+      // Different known years => different film
+      if (year && f.year && String(f.year) !== String(year)) return false;
+      return true;
+    });
+    if (matched.length === 0) return { isDuplicate: false, existingQualities: [] };
 
-    // 2. If no direct match, run normalized fuzzy match against all vault media files
-    if (matchedRows.length === 0) {
-      const allFiles = (await db.execute("SELECT id, movie_title, quality, file_size FROM media_files")).rows;
-      const targetNorm = normalizeTitleFuzzy(cleanTitle);
-      if (targetNorm && targetNorm.length >= 2) {
-        matchedRows = allFiles.filter((f: any) => {
-          const vNorm = normalizeTitleFuzzy(f.movie_title || "");
-          return vNorm === targetNorm;
-        });
-      }
-    }
-
-    if (matchedRows.length === 0) {
-      return { isDuplicate: false, existingQualities: [] };
-    }
-
-    // A match was found in the Vault!
-    // Strict policy: ANY movie in the Vault (whether 720p, 1080p, 4K, 480p, HD) is a DUPLICATE!
-    const existingQualities = Array.from(new Set(matchedRows.map((r: any) => (r.quality || "Unknown").toUpperCase())));
-    return {
-      isDuplicate: true,
-      reason: `Already in Vault (${existingQualities.join(", ")})`,
-      existingQualities
-    };
+    const existingQualities = Array.from(new Set(matched.map(r => (r.quality || "Unknown").toUpperCase())));
+    return { isDuplicate: true, reason: `Already in Vault (${existingQualities.join(", ")})`, existingQualities };
   } catch (err: any) {
     console.warn("[Deduplication] Check error:", err.message);
     return { isDuplicate: false, existingQualities: [] };
@@ -2627,32 +2556,14 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     )
   `);
 
-  // Purge any existing bad numeric/header queue entries
-  try {
-    await db.execute(`
-      DELETE FROM crawler_batch_queue 
-      WHERE clean_title GLOB '[0-9]*' 
-         OR LOWER(clean_title) IN ('rank', 'id', 'title', 'movie', 'index', 'row', 'no', 'film', '#', 's.no.')
-         OR length(clean_title) < 2
-    `);
-  } catch (purgeErr: any) {
-    console.warn("[CrawlerQueue] Queue purge error:", purgeErr.message);
-  }
-
   const lines = csvContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   let totalParsed = 0;
   let queued = 0;
   let duplicatesSkipped = 0;
   const processedItems: Array<{ title: string; cleanTitle: string; year?: string; status: string; reason?: string }> = [];
+  const vaultIndex = await loadVaultIndex();
 
   for (const rawLine of lines) {
-    // Check if line is CSV header row (contains column names like title, rank, movie, year)
-    if (lines.indexOf(rawLine) === 0) {
-      const lower = rawLine.toLowerCase();
-      if (lower.includes("title") || lower.includes("movie") || lower.includes("rank") || lower.includes("index") || lower.includes("name") || lower.includes("s.no")) {
-        continue;
-      }
-    }
     if (/^[\-=#\*_]{3,}$/.test(rawLine)) {
       continue;
     }
@@ -2670,8 +2581,8 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
 
     // Check if already in current pending queue
     const inQueue = (await db.execute({
-      sql: "SELECT id FROM crawler_batch_queue WHERE LOWER(clean_title) = LOWER(?) AND status IN ('pending', 'processing', 'completed')",
-      args: [parsed.cleanTitle]
+      sql: "SELECT id FROM crawler_batch_queue WHERE LOWER(clean_title) = LOWER(?) AND COALESCE(year, '') = COALESCE(?, '') AND status IN ('pending', 'processing', 'completed')",
+      args: [parsed.cleanTitle, finalYear || null]
     })).rows;
 
     if (inQueue.length > 0) {
@@ -2687,7 +2598,7 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     }
 
     // Check Vault duplication
-    const dupCheck = await checkVaultDuplicate(parsed.cleanTitle, parsed.quality);
+    const dupCheck = await checkVaultDuplicate(parsed.cleanTitle, parsed.quality, finalYear, vaultIndex);
     if (dupCheck.isDuplicate) {
       duplicatesSkipped++;
       await db.execute({
@@ -2748,44 +2659,13 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
  * - Automatic Release Year extraction & metadata enrichment from bot responses
  */
 export function sanitizeSearchQuery(title: string): string {
-  let text = (title || "").trim();
-  if (!text) return "";
-
-  // Strip surrounding quotes
-  text = text.replace(/^["']|["']$/g, "").trim();
-
-  // Strip row labels like "Row 19:", "19. ", "#19 ", "No. 19: "
-  text = text.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d+[\.\)\-:]\s*|[-*•]\s*)/gi, "").trim();
-
-  // Strip release groups in brackets, e.g. [YTS.MX], [Pahe.in], [1080p], [4K], [2020]
-  text = text.replace(/\[(?:YTS(?:\.MX)?|Pahe(?:\.in)?|Apple_Movies\w*|F5_FILMS|RARBG|TGx|PSA|GalaxyTV|EZTV|TorrentGalaxy|\d{3,4}p|4K|UHD)\]/gi, "");
-
-  // Extract year if present
-  let year: string | undefined;
-  const yearMatch = text.match(/\b(19\d{2}|20\d{2})\b/);
-  if (yearMatch) {
-    year = yearMatch[1];
-  }
-
-  // Strip technical release descriptors, qualities, formats, codecs, extensions
-  text = text.replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdrip|web-dl|webrip|bluray|brrip|dvdrip|hdtv|x264|x265|hevc|aac|ac3|dts|ddp5\.1|10bit|remux|extended|unrated|directors\.cut|repack)\b/gi, " ");
-
-  // Strip brackets, dots, underscores, hyphens, colons, parentheses
-  text = text.replace(/[\[\]\(\)\{\}_.:-]/g, " ");
-
-  // If year was found, keep title up to year + year itself
-  if (year) {
-    const yearIdx = text.indexOf(year);
-    if (yearIdx > 0) {
-      const cleanBase = text.substring(0, yearIdx).replace(/\s+/g, " ").trim();
-      if (cleanBase.length >= 2) {
-        text = `${cleanBase} ${year}`;
-      }
-    }
-  }
-
-  text = text.replace(/\s+/g, " ").trim();
-  return text;
+  const raw = (title || "").trim().replace(/^["']|["']$/g, "").trim();
+  if (!raw) return "";
+  const stripped = raw.replace(/^(?:row\s*\d+[\.\)\-:]\s*|no\.?\s*\d+[\.\)\-:]\s*|#\d+[\.\)\-:]\s*|\d{1,3}[\.\)\-:]\s+|[-*•]\s*)/i, "").trim();
+  const c = cleanMovieReleaseTitle(stripped);
+  // Search bots match best on "Title Year"; keep colons/hyphens out because most bots tokenise on them
+  const base = c.cleanTitle.replace(/[:\-–—]+/g, " ").replace(/\s+/g, " ").trim();
+  return c.year && !base.includes(c.year) ? `${base} ${c.year}` : base;
 }
 
 /**
@@ -2876,7 +2756,7 @@ export async function processCronBatch(limit: number = 5, isManualTrigger: boole
       });
 
       // Quick secondary deduplication check in case it was added in the meantime
-      const dupCheck = await checkVaultDuplicate(searchQuery, item.requested_quality);
+      const dupCheck = await checkVaultDuplicate(item.clean_title, item.requested_quality, item.year || undefined);
       if (dupCheck.isDuplicate) {
         await db.execute({
           sql: "UPDATE crawler_batch_queue SET status = 'duplicate_skipped', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",

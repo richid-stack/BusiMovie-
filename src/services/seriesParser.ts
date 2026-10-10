@@ -41,7 +41,9 @@ export function cleanRawTitleNoise(input: string): string {
   text = text.replace(/^(?:fc|psa|hevc|webrip|bluray|x265|x264|fbm_hw|fbm|hw|cc|mm|pfm|wmr|pf|cvm|rqm|imdb|mlm|bazar|worldcinematoday)[_.\s-]+/i, "");
   
   // Strip leading track/list numbers like "05.", "1.", "11. ", "08 "
-  text = text.replace(/^\s*\d{1,2}\s*[\.\-_\)]\s*/, "");
+  // Only when followed by whitespace ("05. Title", "3 - Title"): dotted release names like
+  // "21.Jump.Street.2012" or "12.Years.a.Slave" must keep their leading number.
+  text = text.replace(/^\s*\d{1,2}\s*[\.\-_\)]\s+/, "");
   text = text.replace(/^s\s*\d+x\s*/i, "");
 
   text = text.replace(/(?:join\s*@|follow\s*@|telegram\s*@|downloaded\s*from\s*|shared\s*by\s*)[^\s]+/gi, "");
@@ -51,6 +53,38 @@ export function cleanRawTitleNoise(input: string): string {
   text = text.replace(/[\(\[\{:\-_]+$/, "").trim();
 
   return text.trim();
+}
+
+
+/** Canonical quality label: 2160p/UHD/4K -> "4K"; 1080p/720p/480p lower-case; HD/SD upper-case. */
+export function normalizeQuality(input?: string | number | null, fallback: string = "1080p"): string {
+  if (input === undefined || input === null) return fallback;
+  const t = String(input).trim().toLowerCase();
+  if (!t) return fallback;
+  if (/^(2160p?|4k|uhd)$/.test(t)) return "4K";
+  const m = t.match(/^(1080|720|480|360)p?$/);
+  if (m) return `${m[1]}p`;
+  if (t === "hd" || t === "sd") return t.toUpperCase();
+  return fallback;
+}
+
+/** A release year is plausible between 1900 and next year. */
+export function isPlausibleYear(y: string | number | undefined | null): boolean {
+  if (y === undefined || y === null) return false;
+  const n = Number(y);
+  return Number.isInteger(n) && n >= 1900 && n <= new Date().getFullYear() + 1;
+}
+
+/**
+ * Picks the release year out of a spaced title. A year inside (parentheses) or [brackets] wins;
+ * otherwise, when several candidates exist the LAST one is used (titles like "2012 2009" or "Blade Runner 2049 2017").
+ */
+export function pickReleaseYear(spaced: string): string | undefined {
+  const bracketed = spaced.match(/[\(\[]\s*((?:19|20)\d{2})\s*[\)\]]/);
+  if (bracketed && isPlausibleYear(bracketed[1])) return bracketed[1];
+  const all = [...spaced.matchAll(/\b((?:19|20)\d{2})\b/g)].map(m => m[1]).filter(isPlausibleYear);
+  if (all.length === 0) return undefined;
+  return all[all.length - 1];
 }
 
 /**
@@ -65,18 +99,17 @@ export function parseMediaTitleAndSeriesInfo(fileName: string, existingTitle?: s
   const spaced = cleanedNoise.replace(/[\u00a0\s]+/g, " ").replace(/[._]+/g, " ").trim();
 
   // Extract Quality
-  let quality: string = "1080p";
   const qMatch = spaced.match(/\b(2160p|4K|UHD|1080p|720p|480p|HD|SD)\b/i);
-  if (qMatch) {
-    quality = qMatch[1].toUpperCase();
-    if (quality === "UHD") quality = "4K";
-  }
+  const quality: string = normalizeQuality(qMatch ? qMatch[1] : undefined);
 
   // Extract Year
-  let year: string | undefined;
-  const yearMatch = spaced.match(/\b(19\d{2}|20\d{2})\b/);
-  if (yearMatch) {
-    year = yearMatch[1];
+  const year: string | undefined = pickReleaseYear(spaced);
+  // Where the chosen year sits (used to cut the title off); step back over an opening bracket.
+  let yearMatch: { index: number } | null = null;
+  if (year) {
+    const at = spaced.lastIndexOf(year);
+    const opener = spaced.slice(0, at).search(/[\(\[]\s*$/);
+    yearMatch = { index: opener >= 0 ? opener : at };
   }
 
   // Check for S.W.A.T. special case
@@ -108,8 +141,8 @@ export function parseMediaTitleAndSeriesInfo(fileName: string, existingTitle?: s
             season: (ctrlParsed.seasons && ctrlParsed.seasons[0]) ? ctrlParsed.seasons[0] : 1,
             episode: (ctrlParsed.episodeNumbers && ctrlParsed.episodeNumbers[0]) ? ctrlParsed.episodeNumbers[0] : undefined,
             endEpisode: (ctrlParsed.episodeNumbers && ctrlParsed.episodeNumbers[1]) ? ctrlParsed.episodeNumbers[1] : undefined,
-            year: ctrlParsed.year ? String(ctrlParsed.year) : year,
-            quality: ctrlParsed.resolution || quality,
+            year: isPlausibleYear(ctrlParsed.year) ? String(ctrlParsed.year) : year,
+            quality: normalizeQuality(ctrlParsed.resolution, quality),
             rawFileName: fileName
           };
         }
@@ -122,8 +155,8 @@ export function parseMediaTitleAndSeriesInfo(fileName: string, existingTitle?: s
         return {
           isSeries: false,
           cleanTitle: movieParsed.title,
-          year: movieParsed.year ? String(movieParsed.year) : year,
-          quality: movieParsed.resolution || quality,
+          year: isPlausibleYear(movieParsed.year) ? String(movieParsed.year) : year,
+          quality: normalizeQuality(movieParsed.resolution, quality),
           rawFileName: fileName
         };
       }

@@ -433,42 +433,14 @@ export async function setupDatabase() {
 }
 
 export function extractCleanTitleDetails(fileName: string, currentTitle?: string) {
-  let clean = fileName.replace(/\.[a-zA-Z0-9]{2,4}$/, '').trim();
-  clean = clean.replace(/^\[[A-Za-z0-9 _-]+\]\s*/, '');
-  clean = clean.replace(/^@[\w_]+[_\s-]+/i, '').replace(/@[\w_]+/g, '');
-  clean = clean.replace(/^(fc|psa|hevc|webrip|bluray|x265|x264)[_.-]+/i, '');
-  
-  if (/^s\.w\.a\.t/i.test(clean) || /^swat/i.test(clean) || /^s w a t/i.test(clean) || currentTitle === 'S W A T') {
-    const seMatch = clean.match(/s(\d{1,2})e(\d{1,3})/i) || clean.match(/season\s*(\d{1,2})\s*episode\s*(\d{1,3})/i);
-    const qMatch = clean.match(/\b(2160p|4K|1080p|720p|480p|HD)\b/i);
-    return {
-      title: "S.W.A.T.",
-      year: "2017",
-      quality: qMatch ? qMatch[1].toUpperCase() : "720P",
-      season: seMatch ? parseInt(seMatch[1], 10) : undefined,
-      episode: seMatch ? parseInt(seMatch[2], 10) : undefined
-    };
-  }
-
-  const spaced = clean.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const seMatch = spaced.match(/\b(?:s(\d{1,2})\s*e(\d{1,3})|season\s*(\d{1,2})\s*episode\s*(\d{1,3}))\b/i);
-  const yearMatch = spaced.match(/\b(19\d{2}|20\d{2})\b/);
-  const qMatch = spaced.match(/\b(2160p|4k|1080p|720p|480p|hd|uhd)\b/i);
-
-  let cutIdx = spaced.length;
-  if (seMatch && seMatch.index !== undefined && seMatch.index > 0) cutIdx = Math.min(cutIdx, seMatch.index);
-  if (yearMatch && yearMatch.index !== undefined && yearMatch.index > 0) cutIdx = Math.min(cutIdx, yearMatch.index);
-  if (qMatch && qMatch.index !== undefined && qMatch.index > 0) cutIdx = Math.min(cutIdx, qMatch.index);
-
-  let title = spaced.substring(0, cutIdx).replace(/\b(WEBRip|BluRay|BRRip|x264|x265|HEVC|AAC|HDR|HD|HQ|RMSTRD|NF|AMZN|PSA)\b/gi, '').trim();
-  if (!title || title.length < 2) title = spaced;
-
-  const year = yearMatch ? yearMatch[1] : '';
-  const quality = qMatch ? qMatch[1].toUpperCase() : '1080p';
-  const season = seMatch ? parseInt(seMatch[1] || seMatch[3], 10) : undefined;
-  const episode = seMatch ? parseInt(seMatch[2] || seMatch[4], 10) : undefined;
-
-  return { title, year, quality, season, episode };
+  const parsed = parseMediaTitleAndSeriesInfo(fileName, currentTitle);
+  return {
+    title: parsed.cleanTitle,
+    year: parsed.year || "",
+    quality: parsed.quality || "1080p",
+    season: parsed.isSeries ? parsed.season : undefined,
+    episode: parsed.isSeries ? parsed.episode : undefined
+  };
 }
 
 export async function cleanUpCorruptedVaultRecords(): Promise<void> {
