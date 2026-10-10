@@ -1,4 +1,5 @@
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
+import { M, DAILY_REQUEST_LIMIT } from "./messages.js";
 import fs from "fs";
 import path from "path";
 import { Telegraf, Markup, Telegram } from "telegraf";
@@ -40,7 +41,8 @@ import {
   getQuinsonSeriesSeasons,
   getQuinsonSeasonEpisodes,
   isBackOrNavButton,
-  selectBestMatchingButton
+  selectBestMatchingButton,
+  normalizeTitleFuzzy
 } from "../services/crawlerService.js";
 
 // Universal 2-Minute Ephemeral Message Management (120 seconds)
@@ -368,17 +370,17 @@ export async function notifyRequestingUsers(
   trailerUrl?: string
 ) {
   try {
-    const cleanTitle = movieTitle.trim().toLowerCase();
+    // Exact (fuzzy-normalised) title match only. The old LIKE '%title%' woke up every user who had
+    // ever asked for "Up" or "It" whenever any longer title was added.
+    const wanted = normalizeTitleFuzzy(movieTitle);
     const res = await db.execute({
-      sql: `SELECT * FROM requests WHERE status = 'pending' AND (
-        LOWER(title) = ? OR 
-        LOWER(title) LIKE ? OR 
-        ? LIKE '%' || LOWER(title) || '%'
-      )`,
-      args: [cleanTitle, `%${cleanTitle}%`, cleanTitle]
+      sql: `SELECT * FROM requests WHERE status IN ('pending', 'searching')`,
+      args: []
     });
-
-    const requests = res.rows as any[];
+    const requests = (res.rows as any[]).filter(r => {
+      const got = normalizeTitleFuzzy(String(r.title || ""));
+      return got.length >= 2 && got === wanted;
+    });
     if (!requests || requests.length === 0) return;
 
     console.log(`[Phase 3] Notifying ${requests.length} users for newly added title: ${movieTitle}`);
@@ -396,7 +398,7 @@ export async function notifyRequestingUsers(
 
         await bot.telegram.sendMessage(
           req.telegram_id,
-          `🎉 <b>Great News! Your Requested Title is Ready!</b>\n\n🎬 <b>${escapeHtml(movieTitle)}</b> ${year ? `(${year})` : ""}\n🎞 <b>Quality:</b> ${quality}\n🍿 Added to BusiMovie! You can stream or download it now:`,
+          M.notifyReady(movieTitle, year, quality),
           {
             parse_mode: "HTML",
             ...Markup.inlineKeyboard(notifButtons)
@@ -577,9 +579,14 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   }
 
   const isSeries = Boolean(file.season || file.episode || file.is_series);
-  const badge = isSeries ? "📺" : "🎬";
-  const epText = (file.season && file.episode) ? `\n📺 <b>Episode:</b> Season ${file.season}, Episode ${file.episode}` : "";
-  const caption = `${badge} <b>${escapeHtml(file.movie_title as string)}</b> ${file.year ? `(${file.year})` : ""}${epText}\n🎞 <b>Quality:</b> ${file.quality || "HD"}\n💾 <b>Size:</b> ${formatFileSize(Number(file.file_size || 0))}\n\n🍿 <i>Delivered by BusiMovie • Cinema Master</i>\n\n⏳ <b>Notice:</b> This file will self-destruct in 2 minutes for privacy.\n💡 <i>Forward to your Saved Messages now to keep it permanently!</i>`;
+  const caption = M.fileCaption({
+    title: String(file.movie_title),
+    year: file.year ? String(file.year) : undefined,
+    season: file.season ? Number(file.season) : null,
+    episode: file.episode ? Number(file.episode) : null,
+    quality: file.quality ? String(file.quality) : undefined,
+    size: formatFileSize(Number(file.file_size || 0))
+  });
 
   let sentMessage: any;
 
@@ -636,7 +643,7 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   if (file.season && file.episode) {
     const showKey = getShowKey(String(file.movie_title));
     failButtons.push([
-      Markup.button.callback(`⚡ Re-Acquire S0${file.season}E0${file.episode} from Quinson`, `qep_${showKey}_${file.season}_${file.episode}`)
+      Markup.button.callback(`🔄 Try again`, `qep_${showKey}_${file.season}_${file.episode}`)
     ]);
   } else {
     failButtons.push([Markup.button.callback("🔄 Try Delivery Again", `watch_${file.id}`)]);
@@ -644,9 +651,7 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   failButtons.push([Markup.button.callback("🔎 Search Catalog", "search_prompt")]);
 
   await ctx.reply(
-    `⚠️ <b>Delivery Interrupted</b>\n\n` +
-    `We encountered a momentary delay preparing <b>${escapeHtml(file.movie_title as string)}</b>${epText}.\n\n` +
-    `Tap below to re-initiate immediate relay delivery:`,
+    M.deliveryFailed(String(file.movie_title), file.season ? Number(file.season) : undefined, file.episode ? Number(file.episode) : undefined),
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard(failButtons)
@@ -1182,14 +1187,14 @@ export function initializeBot(): Telegraf | null {
       );
     }
     
-    // Check 3 limit per day
+    // Daily limit (single source of truth: DAILY_REQUEST_LIMIT)
     const res = await db.execute({
       sql: "SELECT COUNT(*) as count FROM requests WHERE telegram_id = ? AND date(created_at) = date('now')",
       args: [ctx.from.id.toString()]
     });
     const count = Number(res.rows[0].count || 0);
-    if (count >= 3) {
-      return ctx.reply("❌ <b>Daily Limit Reached</b>\n\nYou have already reached your limit of 3 movie requests for today.\nThe limit resets automatically at midnight (0:00 UTC).", { parse_mode: "HTML" });
+    if (count >= DAILY_REQUEST_LIMIT) {
+      return ctx.reply(M.dailyLimit(), { parse_mode: "HTML" });
     }
 
     await db.execute({
@@ -1578,14 +1583,14 @@ function cleanReleaseButtonLabel(rawText: string): string {
     const userId = ctx.from.id.toString();
     const cleanTitle = targetTitle.trim();
 
-    // Check daily limit (5 requests per day)
+    // Daily limit (single source of truth: DAILY_REQUEST_LIMIT)
     const resCount = await db.execute({
       sql: "SELECT COUNT(*) as count FROM requests WHERE telegram_id = ? AND date(created_at) = date('now')",
       args: [userId]
     });
     const count = Number(resCount.rows[0]?.count || 0);
-    if (count >= 5) {
-      await ctx.answerCbQuery("❌ Daily Limit Reached (5 requests). Try again tomorrow!", { show_alert: true });
+    if (count >= DAILY_REQUEST_LIMIT) {
+      await ctx.answerCbQuery(M.dailyLimitToast(), { show_alert: true });
       return;
     }
 
@@ -1596,16 +1601,8 @@ function cleanReleaseButtonLabel(rawText: string): string {
     });
     const reqId = Number(insRes.lastInsertRowid || 0);
 
-    await ctx.answerCbQuery("⚡ Connecting to BusiMovie Cinema Intelligence...");
-    const statusMsg = await ctx.reply(
-      `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `🔍 <b>Step 1/4: Analyzing Cinema Network & Relays...</b>\n` +
-      `• Scanning high-speed distribution nodes for <b>${escapeHtml(cleanTitle)}</b>\n` +
-      `• Checking video bitrates and verified sources...\n\n` +
-      `<i>Please hold on while we locate the master release.</i>`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.answerCbQuery("Searching…").catch(() => {});
+    const statusMsg = await ctx.reply(M.searching(cleanTitle), { parse_mode: "HTML" });
 
     // Check if query is a TV series via keyword, local vault catalog, or canonical metadata
     let isSeriesQuery = /\b(s\d{1,2}|season|series|episode|ep\s*\d+)\b/i.test(cleanTitle);
@@ -1630,19 +1627,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
     if (isSeriesQuery) {
       try {
-        await new Promise(r => setTimeout(r, 600));
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `📺 <b>Step 2/4: Querying Series Master Relay (@quinsonnbot)...</b>\n` +
-          `• Ingesting TV series episodes for <b>${escapeHtml(cleanTitle)}</b>\n` +
-          `• Storing into dedicated BusiMovie TV Series Channel (-1003983385552)...\n\n` +
-          `<i>Locating verified season releases...</i>`,
-          { parse_mode: "HTML" }
-        ).catch(() => {});
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.searching(cleanTitle), { parse_mode: "HTML" }).catch(() => {});
 
         const quinsonRes = await fetchSeriesFromQuinson({ seriesTitle: cleanTitle });
         if (quinsonRes.success && quinsonRes.firstMediaFileId) {
@@ -1661,21 +1646,13 @@ function cleanReleaseButtonLabel(rawText: string): string {
         args: [reqId]
       });
 
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `📺 <b>Series In Acquisition Queue</b>\n\n` +
-        `We scanned our series relays for <b>${escapeHtml(cleanTitle)}</b>, but the master release is currently synchronizing.\n\n` +
-        `✅ <b>Request Queued:</b> Our cinema distribution nodes are tracking this series. You will be notified the instant an episode is indexed!`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔄 Re-query Series Relay", `req_q_${getQueryKey(cleanTitle)}`)],
-            [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
-          ])
-        }
-      );
+      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seriesNotAvailable(cleanTitle), {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔄 Try again", `req_q_${getQueryKey(cleanTitle)}`)],
+          [Markup.button.callback("🍿 Browse catalog", "browse_library")]
+        ])
+      });
       return;
     }
 
@@ -1696,18 +1673,6 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
       for (const bot of botList) {
         usedBotName = bot.bot_username;
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `⚡ <b>Step 2/4: Locating High-Definition Release...</b>\n` +
-          `• Connecting to cinema distribution relay (${escapeHtml(usedBotName)})\n` +
-          `• Scanning master nodes for <b>${escapeHtml(cleanTitle)}</b>...\n\n` +
-          `<i>Verifying video container and bitrates...</i>`,
-          { parse_mode: "HTML" }
-        ).catch(() => {});
 
         try {
           const searchRes = await testQuerySearchBot(usedBotName, cleanTitle);
@@ -1728,21 +1693,13 @@ function cleanReleaseButtonLabel(rawText: string): string {
           args: [reqId]
         });
 
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          `🎬 <b>Title Currently Unavailable</b>\n\n` +
-          `We searched our cinema distribution relays, but couldn't locate an active release for <b>${escapeHtml(cleanTitle)}</b> right now.\n\n` +
-          `✅ <b>Request Logged:</b> Your request has been queued in our priority acquisition line. We will notify you directly the moment it becomes available on BusiMovie.`,
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("🍿 Browse Catalog", "browse_library")],
-              [Markup.button.callback("🔎 Search Another Title", "search_prompt")]
-            ])
-          }
-        );
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.notAvailable(cleanTitle), {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🍿 Browse catalog", "browse_library")],
+            [Markup.button.callback("🔎 Search another title", "search_prompt")]
+          ])
+        });
         return;
       }
 
@@ -1772,9 +1729,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
           ctx.chat.id,
           statusMsg.message_id,
           undefined,
-          `🎬 <b>Verified Releases Available!</b>\n\n` +
-          `High-definition stream nodes found for <b>${escapeHtml(cleanTitle)}</b>.\n` +
-          `Select your preferred edition for immediate delivery:`,
+          M.chooseVersion(cleanTitle),
           {
             parse_mode: "HTML",
             ...Markup.inlineKeyboard(keyboardRows)
@@ -1784,28 +1739,22 @@ function cleanReleaseButtonLabel(rawText: string): string {
       }
 
       // If single release or direct media
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `📥 <b>Step 3/4: Acquiring Master Stream...</b>\n` +
-        `• Ingesting 1080p release for <b>${escapeHtml(cleanTitle)}</b>\n` +
-        `• Preparing direct cinema delivery to your chat...\n\n` +
-        `<i>Your file is arriving shortly!</i>`,
-        { parse_mode: "HTML" }
-      ).catch(() => {});
+      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.found(cleanTitle), { parse_mode: "HTML" }).catch(() => {});
 
       try {
         const bestBtn = selectBestMatchingButton(foundResult.buttons, cleanTitle);
+        if (!bestBtn && !(foundResult as any).hasDirectMedia) {
+          throw new Error("No result confidently matched the requested title.");
+        }
         const fwdRes = await fetchAndForwardBotMedia({
           botUsername: usedBotName,
           messageId: foundResult.messageId || 0,
           buttonRow: bestBtn?.row,
           buttonCol: bestBtn?.col,
-          userTelegramId: ctx.from.id
+          userTelegramId: ctx.from.id,
+          expect: { title: cleanTitle }
         });
+        if (!fwdRes.success) throw new Error(fwdRes.message);
 
         await markRequestsFulfilled([reqId]);
 
@@ -1817,7 +1766,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
             ctx.chat.id,
             statusMsg.message_id,
             undefined,
-            `🎬 <b>Ready to Watch!</b>\n\n<b>${escapeHtml(fwdRes.fileName || cleanTitle)}</b> has arrived and is ready for playback:`,
+            M.readyToWatch(cleanTitle),
             {
               parse_mode: "HTML",
               ...Markup.inlineKeyboard([
@@ -1828,38 +1777,22 @@ function cleanReleaseButtonLabel(rawText: string): string {
         }
       } catch (fwdErr: any) {
         console.warn("Peer media fetch delay/error:", fwdErr?.message);
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          `🎬 <b>Acquisition Processing</b>\n\n` +
-          `We encountered a temporary network delay retrieving <b>${escapeHtml(cleanTitle)}</b>.\n\n` +
-          `Your request is queued. We will notify you directly as soon as delivery completes!`,
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("🔄 Re-try Acquisition", `req_q_${getQueryKey(cleanTitle)}`)],
-              [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
-            ])
-          }
-        );
+        await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] });
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.takingLonger(cleanTitle), {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔄 Try again", `req_q_${getQueryKey(cleanTitle)}`)],
+            [Markup.button.callback("🍿 Browse catalog", "browse_library")]
+          ])
+        });
       }
     } catch (err: any) {
       console.error("Autonomous request error:", err);
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `🎬 <b>Title Currently Unavailable</b>\n\n` +
-        `We searched our distribution channels, but couldn't locate a verified high-quality release for <b>${escapeHtml(cleanTitle)}</b> right now.\n\n` +
-        `✅ <b>Request Logged:</b> Your request has been queued in our acquisition line. We will notify you directly the moment it becomes available on BusiMovie.`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
-          ])
-        }
-      ).catch(() => {});
+      await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] }).catch(() => {});
+      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.notAvailable(cleanTitle), {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback("🍿 Browse catalog", "browse_library")]])
+      }).catch(() => {});
     }
   }
 
@@ -1889,19 +1822,11 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
     const cached = botRespCache.get(respKey);
     if (!cached) {
-      return ctx.answerCbQuery("⚠️ Selection expired. Please search again.");
+      return ctx.answerCbQuery(M.selectionExpired());
     }
 
-    await ctx.answerCbQuery("⚡ Preparing high-speed file delivery...");
-    await ctx.editMessageText(
-      `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📥 <b>Step 3/4: Ingesting & Buffering Video...</b>\n` +
-      `• Transferring high-definition release for <b>${escapeHtml(cached.query)}</b>\n` +
-      `• Initializing high-speed direct stream buffer...\n\n` +
-      `<i>Please hold on, stream arriving in moments!</i>`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.answerCbQuery().catch(() => {});
+    await ctx.editMessageText(M.found(cached.query), { parse_mode: "HTML" });
 
     try {
       const fwdRes = await fetchAndForwardBotMedia({
@@ -1909,8 +1834,10 @@ function cleanReleaseButtonLabel(rawText: string): string {
         messageId: cached.messageId,
         buttonRow: row,
         buttonCol: col,
-        userTelegramId: ctx.from.id
+        userTelegramId: ctx.from.id,
+        expect: { title: cached.query }
       });
+      if (!fwdRes.success) throw new Error(fwdRes.message);
 
       await markRequestsFulfilled([reqId]);
 
@@ -2107,7 +2034,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
     // Batch Ingest Season button
     episodeButtons.push([
-      Markup.button.callback(`📦 Ingest Full Season ${seasonNum} (All Episodes)`, `qall_${showKey}_${seasonNum}`)
+      Markup.button.callback(`📦 Get full Season ${seasonNum}`, `qall_${showKey}_${seasonNum}`)
     ]);
 
     // Pagination row
@@ -2150,17 +2077,8 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
     const seriesTitle = await resolveShowTitle(showKey);
 
-    await ctx.answerCbQuery("⚡ Preparing high-speed episode delivery...");
-    await ctx.editMessageText(
-      `🧠 <b>BusiMovie Cinema Intelligence</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📥 <b>Acquiring Season ${seasonNum} Episode ${epNum}...</b>\n` +
-      `• Series: <b>${escapeHtml(seriesTitle)}</b>\n` +
-      `• Ingesting master stream from Quinson Relay...\n` +
-      `• Storing into TV Series Channel (-1003983385552)...\n\n` +
-      `<i>Please hold on, your episode is arriving shortly!</i>`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.answerCbQuery().catch(() => {});
+    await ctx.editMessageText(M.episodeGetting(seriesTitle, seasonNum, epNum), { parse_mode: "HTML" });
 
     try {
       const quinsonRes = await fetchSeriesFromQuinson({
@@ -2173,33 +2091,23 @@ function cleanReleaseButtonLabel(rawText: string): string {
         await ctx.deleteMessage().catch(() => {});
         await deliverMediaFile(ctx, quinsonRes.firstMediaFileId);
       } else {
-        await ctx.editMessageText(
-          `📺 <b>Acquisition Notice</b>\n\n` +
-          `Episode <b>S${seasonNum}E${epNum}</b> for <b>${escapeHtml(seriesTitle)}</b> is being processed on relay nodes.\n\n` +
-          `We will notify you directly the moment it becomes available!`,
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("◀️ Back to Episodes", `eps_${showKey}_${seasonNum}_1`)],
-              [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
-            ])
-          }
-        );
+        await ctx.editMessageText(M.episodeNotAvailable(seriesTitle, seasonNum, epNum), {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("◀️ Back to episodes", `eps_${showKey}_${seasonNum}_1`)],
+            [Markup.button.callback("🍿 Browse catalog", "browse_library")]
+          ])
+        });
       }
     } catch (err: any) {
       console.error("Error in qep callback:", err);
-      await ctx.editMessageText(
-        `📺 <b>Acquisition Delay</b>\n\n` +
-        `We encountered a network delay retrieving <b>${escapeHtml(seriesTitle)} (S${seasonNum}E${epNum})</b>.\n\n` +
-        `Your request has been queued in our priority buffer.`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔄 Re-try Acquisition", `qep_${showKey}_${seasonNum}_${epNum}`)],
-            [Markup.button.callback("◀️ Back to Episodes", `eps_${showKey}_${seasonNum}_1`)]
-          ])
-        }
-      );
+      await ctx.editMessageText(M.episodeDelayed(seriesTitle, seasonNum, epNum), {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔄 Try again", `qep_${showKey}_${seasonNum}_${epNum}`)],
+          [Markup.button.callback("◀️ Back to episodes", `eps_${showKey}_${seasonNum}_1`)]
+        ])
+      });
     }
   });
 
@@ -2210,36 +2118,16 @@ function cleanReleaseButtonLabel(rawText: string): string {
     const seasonNum = parseInt(ctx.match[2], 10);
     const seriesTitle = await resolveShowTitle(showKey);
 
-    await ctx.answerCbQuery(`⚡ Starting Full Season ${seasonNum} Ingestion...`);
-    const statusMsg = await ctx.reply(
-      `📺 <b>BusiMovie Cinema Intelligence</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `📦 <b>Batch Ingesting Full Season ${seasonNum}...</b>\n` +
-      `• Series: <b>${escapeHtml(seriesTitle)}</b>\n` +
-      `• Connecting to Quinson Relay...\n` +
-      `• Archiving all season episodes to Channel (-1003983385552)...\n\n` +
-      `<i>Please wait while the episodes are captured and indexed...</i>`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.answerCbQuery().catch(() => {});
+    const statusMsg = await ctx.reply(M.seasonStarting(seriesTitle, seasonNum), { parse_mode: "HTML" });
 
     try {
       const res = await fetchSeriesFromQuinson({
         seriesTitle,
         seasonNum,
         allEpisodes: true,
-        onProgress: async (count, latestTitle) => {
-          await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            undefined,
-            `📺 <b>BusiMovie Cinema Intelligence</b>\n` +
-            `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-            `📦 <b>Ingesting Season ${seasonNum} (${count} episodes captured)...</b>\n` +
-            `• Series: <b>${escapeHtml(seriesTitle)}</b>\n` +
-            `• Latest: <code>${escapeHtml(latestTitle)}</code>\n` +
-            `• Archiving into TV Series Channel (-1003983385552)...`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
+        onProgress: async (count) => {
+          await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seasonProgress(seriesTitle, seasonNum, count), { parse_mode: "HTML" }).catch(() => {});
         }
       });
 
@@ -2261,11 +2149,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
           ctx.chat.id,
           statusMsg.message_id,
           undefined,
-          `✅ <b>Full Season ${seasonNum} Successfully Ingested!</b>\n\n` +
-          `• Series: <b>${escapeHtml(seriesTitle)}</b>\n` +
-          `• Total Episodes Captured: <b>${res.filesIngested}</b>\n` +
-          `• Storage: Private BusiMovie TV Channel (-1003983385552)\n\n` +
-          `All episodes are now ready in your catalog for immediate streaming!`,
+          M.seasonDone(seriesTitle, seasonNum, res.filesIngested),
           {
             parse_mode: "HTML",
             ...Markup.inlineKeyboard(finishButtons)
@@ -2276,9 +2160,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
           ctx.chat.id,
           statusMsg.message_id,
           undefined,
-          `⚠️ <b>Batch Ingestion Notice</b>\n\n` +
-          `Episodes for <b>${escapeHtml(seriesTitle)} (Season ${seasonNum})</b> are currently in high demand on relays.\n\n` +
-          `You can still tap individual episodes to stream them on demand!`,
+          M.seasonNone(seriesTitle, seasonNum),
           {
             parse_mode: "HTML",
             ...Markup.inlineKeyboard([
@@ -2293,8 +2175,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
         ctx.chat.id,
         statusMsg.message_id,
         undefined,
-        `⚠️ <b>Temporary Delay Ingesting Season ${seasonNum}</b>\n\n` +
-        `Relays are synchronizing. You can browse episodes individually below:`,
+        M.seasonDelayed(seriesTitle, seasonNum),
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([

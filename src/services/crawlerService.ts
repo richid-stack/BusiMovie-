@@ -1375,6 +1375,8 @@ export async function fetchAndForwardBotMedia(params: {
   buttonCol?: number;
   userTelegramId?: string | number;
   isSeries?: boolean;
+  /** What the caller asked for; the downloaded file is checked against it before anything is forwarded. */
+  expect?: DownloadExpectation;
 }): Promise<{
   success: boolean;
   message: string;
@@ -1523,6 +1525,23 @@ export async function fetchAndForwardBotMedia(params: {
     throw new Error("The bot did not return a video media message. If the bot required joining a channel, try clicking again now that channels are joined.");
   }
 
+  // 0. Verification gate: refuse to store a file that is clearly not what was requested.
+  {
+    const preAttr = ((mediaMsgToForward.document as any)?.attributes || []).find((a: any) => a.className === "DocumentAttributeFilename") as any;
+    const preName = preAttr?.fileName || "";
+    const check = verifyDownloadedFile(params.expect, preName, mediaMsgToForward.message);
+    if (!check.ok) {
+      logActivity({
+        type: "vault_forward",
+        source: cleanUsername,
+        title: `Rejected wrong file from ${cleanUsername}`,
+        details: `${check.reason} (file: "${preName || "unnamed"}")`,
+        status: "failed"
+      } as any);
+      return { success: false, message: `The file from ${cleanUsername} did not match the request. ${check.reason}` };
+    }
+  }
+
   // 1. Forward the real file into the storage channel for catalog preservation
   const forwardedResult = await client.forwardMessages(vaultEntity, {
     messages: [mediaMsgToForward.id],
@@ -1552,8 +1571,11 @@ export async function fetchAndForwardBotMedia(params: {
     }
   }
 
-  // No guessing: if the forward result carried no message id we leave it empty rather than
-  // grabbing "the latest message" (which can belong to a different upload).
+  // No guessing: without a confirmed channel message id the file could not be delivered reliably,
+  // and a wrong id would deliver someone else's upload — so we stop here instead.
+  if (!realChannelMsgId) {
+    return { success: false, message: "The file was sent but its storage position could not be confirmed. Please try again." };
+  }
 
   // Ingest media to storage channel (our bot will deliver to user cleanly without external peer tags)
   let deliveredDirectly = false;
@@ -2209,14 +2231,24 @@ export async function dispatchAutomatedSearch(query: string, userTelegramId?: st
 
     // Select the best matching download button using semantic scoring
     const bestBtn = selectBestMatchingButton(searchRes.buttons, cleanTitle);
+    if (searchRes.messageId && !bestBtn && !searchRes.hasDirectMedia) {
+      const msg = "The bot answered, but none of its results confidently matched the title.";
+      await db.execute({ sql: "UPDATE search_jobs SET status = 'failed', error = ? WHERE id = ?", args: [msg, jobId] });
+      return { success: false, jobId, title: cleanTitle, message: msg };
+    }
     if (searchRes.messageId) {
       try {
         const fwdRes = await fetchAndForwardBotMedia({
           botUsername: botToUse,
           messageId: searchRes.messageId,
           buttonRow: bestBtn?.row,
-          buttonCol: bestBtn?.col
+          buttonCol: bestBtn?.col,
+          expect: { title: cleanTitle }
         });
+        if (!fwdRes.success) {
+          await db.execute({ sql: "UPDATE search_jobs SET status = 'failed', error = ? WHERE id = ?", args: [fwdRes.message, jobId] });
+          return { success: false, jobId, title: cleanTitle, message: fwdRes.message };
+        }
 
         // Update job to fulfilled
         await db.execute({
@@ -2245,7 +2277,7 @@ export async function dispatchAutomatedSearch(query: string, userTelegramId?: st
                 const safeTitle = cleanTitle.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
                 await botInstance.telegram.sendMessage(
                   (r as any).telegram_id,
-                  `🤖 <b>Autonomous Bot Fulfillment Complete!</b>\n\n🎬 <b>${safeTitle}</b> was successfully fetched by our crawler userbot and added to the Vault!\n\nTap /webapp to stream or download now!`,
+                  `🎉 <b>Your request is ready</b>\n\n🎬 <b>${safeTitle}</b> has been added. Tap /webapp to watch now.`,
                   { parse_mode: "HTML" }
                 );
               } catch (e) {
@@ -2485,6 +2517,53 @@ export function normalizeTitleFuzzy(title: string): string {
   t = t.replace(/[:\-_.,'"`!?()]/g, " ");
   return t.replace(/\s+/g, " ").trim();
 }
+
+export interface DownloadExpectation { title: string; year?: string; season?: number; episode?: number }
+
+/**
+ * Verification gate: does the file the bot sent look like what was asked for?
+ * Unverifiable names (e.g. "Video.mp4") pass but are flagged `verified: false`; positive mismatches are rejected.
+ */
+export function verifyDownloadedFile(
+  expect: DownloadExpectation | undefined,
+  fileName: string,
+  caption?: string
+): { ok: boolean; verified: boolean; reason?: string } {
+  if (!expect || !expect.title) return { ok: true, verified: false };
+
+  const candidates = [fileName, caption].filter((x): x is string => Boolean(x && x.trim()));
+  const wantNorm = normalizeTitleFuzzy(expect.title);
+  let sawComparable = false;
+  let lastReason = "";
+
+  for (const text of candidates) {
+    const p = parseMediaTitleAndSeriesInfo(text);
+    const gotNorm = normalizeTitleFuzzy(p.cleanTitle || "");
+    if (!gotNorm || gotNorm.length < 2) continue;
+    // Generic / machine names carry no title information, so they cannot disprove anything
+    if (/^(video|movie|film|file|document|untitled|unnamed|media|download|tg video|telegram video)( \d+)?$/.test(gotNorm) || /^[a-f0-9 ]{8,}$/.test(gotNorm)) continue;
+    sawComparable = true;
+
+    let sim = 0;
+    try { sim = stringSimilarity.compareTwoStrings(wantNorm, gotNorm); } catch (_) {}
+    const contains = gotNorm.includes(wantNorm) || wantNorm.includes(gotNorm);
+    if (sim < 0.6 && !contains) { lastReason = `Title mismatch: wanted "${expect.title}", got "${p.cleanTitle}"`; continue; }
+
+    if (expect.year && p.year && Math.abs(Number(expect.year) - Number(p.year)) > 1) {
+      lastReason = `Year mismatch: wanted ${expect.year}, got ${p.year}`; continue;
+    }
+    if (expect.season !== undefined && p.isSeries && p.season !== undefined && p.season !== expect.season) {
+      lastReason = `Season mismatch: wanted S${expect.season}, got S${p.season}`; continue;
+    }
+    if (expect.episode !== undefined && p.isSeries && p.episode !== undefined && p.episode !== expect.episode) {
+      lastReason = `Episode mismatch: wanted E${expect.episode}, got E${p.episode}`; continue;
+    }
+    return { ok: true, verified: true };
+  }
+  if (!sawComparable) return { ok: true, verified: false };
+  return { ok: false, verified: true, reason: lastReason };
+}
+
 
 export interface VaultIndexRow { movie_title: string; year: string | null; quality: string | null }
 
@@ -2794,12 +2873,21 @@ export async function processCronBatch(limit: number = 5, isManualTrigger: boole
               item.year || undefined,
               item.requested_quality || "1080p"
             );
+            if (!bestBtn && !searchRes.hasDirectMedia) {
+              logs.push(`⚠️ ${bot.bot_username}: no result confidently matched "${item.clean_title}" — trying the next bot.`);
+              continue;
+            }
             const fwdRes = await fetchAndForwardBotMedia({
               botUsername: bot.bot_username,
               messageId: searchRes.messageId,
               buttonRow: bestBtn?.row,
-              buttonCol: bestBtn?.col
+              buttonCol: bestBtn?.col,
+              expect: { title: item.clean_title, year: item.year || undefined }
             });
+            if (!fwdRes.success) {
+              logs.push(`⚠️ ${bot.bot_username}: ${fwdRes.message}`);
+              continue;
+            }
 
             if (fwdRes.success) {
               itemFulfilled = true;
