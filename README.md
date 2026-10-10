@@ -1,59 +1,48 @@
-# BusiMovie — Telegram Movie Vault & AI Concierge
+# BusiMovie
 
-An advanced Telegram bot and modern web dashboard for movie/TV media management, streaming discovery, and AI-powered recommendations.
+A Telegram bot and a Netflix-style web storefront for movies and series. Viewers browse on the site (or in the bot), tap **Watch**, and the file is delivered to them in Telegram. A background crawler fetches missing titles from external Telegram bots into your private vault channels.
 
-## Features
+## How it fits together
 
-- **Telegram Bot Integration**:
-  - Outbound **Long Polling** mode for local and development environments.
-  - Inbound **24/7 Webhook** mode for production deployments (e.g., Google Cloud Run).
-  - Search movies and TV series with real-time OMDb metadata.
-  - Forward media files and videos directly in Telegram to sync with your cloud library.
-  - AI Cinema Concierge powered by Gemini (with multi-model fallback cascade).
-  - Interactive inline buttons, streaming links, and trailer previews.
-- **Web Dashboard**:
-  - Live vault monitoring, library statistics, and user interactions.
-  - Telegram connection management (toggle between Long Polling and 24/7 Webhook).
-  - Built with React, Vite, and Tailwind CSS.
-- **Backend**:
-  - Express.js server on Node.js.
-  - Firebase Firestore persistence for user profiles, media library, and interaction logs.
+| Part | Where | What it does |
+|---|---|---|
+| Storefront | `src/storefront`, `src/pages/UserStorefront.tsx` | Public site: billboard, rows, search, "request this title". No file URLs are ever exposed; Play opens the bot. |
+| Admin console | `/admin` (`src/pages/AdminDashboard.tsx`) | Library, requests, crawler, broadcasts. Login with `ADMIN_PASSWORD` or Telegram Login. |
+| Bot | `src/bot` | Search, requests, season/episode pickers, delivery (copies the file from the vault; deleted after 2 minutes). All wording lives in `src/bot/messages.ts`. |
+| Crawler | `src/crawler` | Walks external bots' screens to a file, verifies it, stores it in the vault. See below. |
+| Database | `src/db` | SQLite/libsql. Use Turso in production (hosted disks are ephemeral). |
 
-## Environment Variables
+### The crawler in one paragraph
+Everything that needs a file goes into one durable queue (`crawl_jobs`): viewer requests, admin clicks, CSV/cron batches. One worker takes jobs (user > admin > cron) and tries each suitable bot in priority order. For each bot it reads the screen the bot is showing, classifies it (results, quality, seasons, episodes, join-gate, throttled, empty, still-searching, file), and presses only a confidently matching button. The file that arrives is checked against the request (title, year, season, episode), forwarded to the vault, the exact vault message id is confirmed, and only then is it indexed. Every attempt leaves a step-by-step trace for 7 days (`GET /api/crawler/jobs/:id`, or the Crawl Jobs panel in the admin). When the rules cannot decide a screen and `GEMINI_API_KEY` is set, Gemini may suggest a button; its suggestion is checked like any other.
 
-Copy `.env.example` to `.env` and fill in your keys:
-
-```env
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-GEMINI_API_KEY=your_gemini_api_key
-OMDB_API_KEY=your_omdb_api_key
-APP_URL=https://your-deployed-service.run.app # optional, for production webhooks
-```
-
-## Running Locally
+## Run it
 
 ```bash
-# Install dependencies
 npm install
-
-# Start development server
-npm run dev
+cp .env.example .env   # fill in the values below
+npm run dev            # http://localhost:3000
+npm test               # crawler, parser, database tests
+npx tsc --noEmit       # typecheck
 ```
 
-Visit `http://localhost:3000` to access the dashboard.
+Design preview with demo data (no database needed): `/?demo=1` (add `&nosplash` to skip the intro).
 
-## Production Build & Deployment
+## Environment variables
 
-```bash
-# Build frontend and compile backend
-npm run build
+| Variable | Needed for |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | the bot (required) |
+| `ADMIN_PASSWORD`, `ADMIN_TELEGRAM_IDS`, `SESSION_SECRET` | admin login and admin bot commands |
+| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | persistent database (without them a local file is used and is lost on redeploy) |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_USER_SESSION` | the crawler's Telegram account |
+| `TELEGRAM_VAULT_CHANNEL_ID`, `TELEGRAM_SERIES_VAULT_CHANNEL_ID` | where files are stored (can also be set in the admin) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | recommendations and the crawler's AI advisor (optional) |
+| `TMDB_API_KEY`, `OMDB_API_KEY` | richer metadata (optional) |
+| `DAILY_REQUEST_LIMIT` | requests per viewer per day (default 5) |
+| `APP_URL` | public URL for the webhook |
 
-# Start production server
-npm start
-```
+## Polling vs webhook
+In development the bot uses long polling. When the app is published (a public `APP_URL`), it switches to a webhook, protected by a secret token. Both are kept.
 
-### Deploying to Google Cloud Run
-
-1. Deploy the service with port `3000` exposed.
-2. Provide your environment variables (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, etc.) in Cloud Run settings.
-3. Open your deployed Cloud Run URL, navigate to the **Telegram Connection** card, enter your public URL, and click **Enable Webhook** for 24/7 bot response.
+## Deploy
+`npm run build` then `npm start` (port 3000). On Cloud Run / AI Studio set the variables above as secrets, and always set `TURSO_*` so data survives restarts.

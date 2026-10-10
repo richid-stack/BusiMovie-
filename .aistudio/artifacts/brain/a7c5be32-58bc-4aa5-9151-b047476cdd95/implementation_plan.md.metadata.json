@@ -1,6 +1,0 @@
-{
-  "summary":  "Comprehensive architectural implementation plan to eliminate all discovered logic weaknesses: fixing the single-file loop break in Quinson crawler to support true multi-episode and 'Get All Episodes' batch ingestion, eliminating the dangerous random-message fallback that delivered 'The Gifted', solving the S1E1 catalog trap with a hybrid blueprint hierarchy showing all seasons/episodes with live on-demand fetch, enforcing strict media type isolation so series never route to movie bots, cleaning all TV emoji inconsistencies, and persisting callback caches in SQLite.",
-  "updatedAt":  "2026-10-05T16:49:20.783726098Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

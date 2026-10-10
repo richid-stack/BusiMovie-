@@ -14,21 +14,18 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'Telegram Movie Vault',
-          short_name: 'MovieVault',
-          description: 'A modern installable web application for Telegram Movie Vault.',
-          theme_color: '#4f46e5',
-          background_color: '#0f172a',
+          name: 'BusiMovie',
+          short_name: 'BusiMovie',
+          description: 'Movies and series, delivered straight to Telegram.',
+          theme_color: '#09090b',
+          background_color: '#09090b',
           display: 'standalone',
           start_url: '/',
           scope: '/',
           icons: [
-            {
-              src: 'https://cdn-icons-png.flaticon.com/512/864/864818.png', // Temporary generic icon for PWA test
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'any maskable'
-            }
+            { src: '/pwa-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+            { src: '/pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+            { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'maskable' }
           ]
         },
         devOptions: {

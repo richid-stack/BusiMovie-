@@ -14,8 +14,9 @@ function getAIClient(): GoogleGenAI | null {
 }
 
 // Supported models with automatic fallback on temporary high demand (503)
-const PRIMARY_MODEL = "gemini-3.8-flash";
-const FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-flash-latest"];
+// Override with GEMINI_MODEL; the "-latest" aliases always resolve to a current model.
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+const FALLBACK_MODELS = ["gemini-flash-lite-latest"];
 
 async function executeGeminiWithFallback<T>(
   operation: (modelName: string) => Promise<T>
