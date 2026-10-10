@@ -1,20 +1,4 @@
 import { createClient } from "@libsql/client";
-import path from "path";
-import fs from "fs";
-import { 
-  initFirebase, 
-  saveMediaFileToFirestore, 
-  getAllMediaFilesFromFirestore, 
-  deleteMediaFileFromFirestore,
-  saveAppSettingToFirestore,
-  getAppSettingFromFirestore,
-  getAllAppSettingsFromFirestore,
-  deleteAppSettingFromFirestore,
-  saveSearchBotsToFirestore,
-  getAllSearchBotsFromFirestore,
-  saveCrawlerTargetsToFirestore,
-  getAllCrawlerTargetsFromFirestore
-} from "./firebase.js";
 import { parseMediaTitleAndSeriesInfo, groupMediaIntoCatalog } from "../services/seriesParser.js";
 
 // Initialize the SQLite database
@@ -30,216 +14,15 @@ const db = createClient(
 // Secrets must never be mirrored to disk JSON or Firestore (both were world-readable).
 const SECRET_SETTING_KEYS = new Set(["telegram_user_session"]);
 
-const BACKUP_FILE = path.join(process.cwd(), "vault_library.json");
-const SETTINGS_BACKUP_FILE = path.join(process.cwd(), "settings_backup.json");
-const BOTS_BACKUP_FILE = path.join(process.cwd(), "bots_backup.json");
-const TARGETS_BACKUP_FILE = path.join(process.cwd(), "targets_backup.json");
-
-function readJsonFile<T>(filePath: string, fallback: T): T {
-  try {
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, "utf8");
-      if (raw.trim()) return JSON.parse(raw);
-    }
-  } catch (err) {
-    console.warn("Could not read JSON file " + filePath + ":", err);
+/** Which database is in use, for the admin dashboard. */
+export function getDatabaseInfo(): { kind: "turso" | "file"; persistent: boolean; host?: string } {
+  const url = process.env.TURSO_DATABASE_URL;
+  if (url) {
+    let host: string | undefined;
+    try { host = new URL(url.replace(/^libsql:/, "https:")).host; } catch { /* ignore */ }
+    return { kind: "turso", persistent: true, host };
   }
-  return fallback;
-}
-
-function writeJsonFile(filePath: string, data: any): void {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
-  } catch (err) {
-    console.warn("Could not write JSON file " + filePath + ":", err);
-  }
-}
-
-export async function syncVaultToDisk(): Promise<void> {
-  try {
-    const res = await db.execute("SELECT * FROM media_files ORDER BY id ASC");
-    if (res.rows && res.rows.length > 0) {
-      fs.writeFileSync(BACKUP_FILE, JSON.stringify(res.rows, null, 2), "utf8");
-    }
-  } catch (err) {
-    console.warn("Could not sync vault to disk backup:", err);
-  }
-}
-
-export async function syncVaultWithFirestore(): Promise<void> {
-  try {
-    initFirebase();
-    const cloudFiles = await getAllMediaFilesFromFirestore();
-    
-    if (cloudFiles && cloudFiles.length > 0) {
-      console.log(`[Firestore Sync] Found ${cloudFiles.length} media items in Firebase Firestore. Merging to local vault...`);
-      for (const file of cloudFiles) {
-        if (!file.movie_title) continue;
-        const id = file.id ? Number(file.id) : null;
-        if (id) {
-          await db.execute({
-            sql: `
-              INSERT OR REPLACE INTO media_files (
-                id, movie_id, movie_title, year, telegram_file_id, 
-                telegram_channel_id, telegram_message_id, file_name, 
-                file_size, quality, language, mime_type, season, episode, poster_url, trailer_url
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            args: [
-              id,
-              file.movie_id || `tg_${Date.now()}`,
-              file.movie_title,
-              file.year || "",
-              file.telegram_file_id || "",
-              file.telegram_channel_id || "",
-              file.telegram_message_id || "",
-              file.file_name || `${file.movie_title}.mp4`,
-              file.file_size || 0,
-              file.quality || "1080p",
-              file.language || "English",
-              file.mime_type || "video/mp4",
-              file.season ?? null,
-              file.episode ?? null,
-              file.poster_url || null,
-              file.trailer_url || null
-            ]
-          });
-        } else {
-          await db.execute({
-            sql: `
-              INSERT INTO media_files (
-                movie_id, movie_title, year, telegram_file_id, 
-                telegram_channel_id, telegram_message_id, file_name, 
-                file_size, quality, language, mime_type, season, episode, poster_url, trailer_url
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            args: [
-              file.movie_id || `tg_${Date.now()}`,
-              file.movie_title,
-              file.year || "",
-              file.telegram_file_id || "",
-              file.telegram_channel_id || "",
-              file.telegram_message_id || "",
-              file.file_name || `${file.movie_title}.mp4`,
-              file.file_size || 0,
-              file.quality || "1080p",
-              file.language || "English",
-              file.mime_type || "video/mp4",
-              file.season ?? null,
-              file.episode ?? null,
-              file.poster_url || null,
-              file.trailer_url || null
-            ]
-          });
-        }
-      }
-      await syncVaultToDisk();
-      console.log(`[Firestore Sync] Successfully restored and cached ${cloudFiles.length} movies from Firestore.`);
-    } else {
-      // Cloud is empty, push local backup to Firestore
-      const localRes = await db.execute("SELECT * FROM media_files ORDER BY id ASC");
-      if (localRes.rows && localRes.rows.length > 0) {
-        console.log(`[Firestore Sync] Firestore library empty. Backing up ${localRes.rows.length} local movies to Firebase Firestore...`);
-        for (const row of localRes.rows) {
-          await saveMediaFileToFirestore(row);
-        }
-        console.log(`[Firestore Sync] Cloud backup complete.`);
-      }
-    }
-  } catch (err) {
-    console.error("[Firestore Sync] Error synchronizing with Firebase Firestore:", err);
-  }
-}
-
-export async function restoreVaultFromDisk(): Promise<number> {
-  try {
-    if (!fs.existsSync(BACKUP_FILE)) {
-      // If backup doesn't exist yet, seed it from existing media_files
-      await syncVaultToDisk();
-      return 0;
-    }
-
-    const raw = fs.readFileSync(BACKUP_FILE, "utf8");
-    if (!raw.trim()) return 0;
-    const items: MediaFileRecord[] = JSON.parse(raw);
-    if (!Array.isArray(items) || items.length === 0) return 0;
-
-    let restoredCount = 0;
-    for (const file of items) {
-      const existing = await db.execute({
-        sql: "SELECT id FROM media_files WHERE telegram_file_id = ? OR (LOWER(movie_title) = LOWER(?) AND (year = ? OR ? = '')) LIMIT 1",
-        args: [file.telegram_file_id || "", file.movie_title || "", file.year || "", file.year || ""]
-      });
-
-      if (existing.rows.length === 0 && file.movie_title) {
-        if (file.id) {
-          await db.execute({
-            sql: `
-              INSERT OR REPLACE INTO media_files (
-                id, movie_id, movie_title, year, telegram_file_id, 
-                telegram_channel_id, telegram_message_id, file_name, 
-                file_size, quality, language, mime_type, season, episode, poster_url, trailer_url
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            args: [
-              file.id,
-              file.movie_id || `tg_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-              file.movie_title,
-              file.year || "",
-              file.telegram_file_id || `tg_file_${Date.now()}`,
-              file.telegram_channel_id || "",
-              file.telegram_message_id || "",
-              file.file_name || `${file.movie_title}.mp4`,
-              file.file_size || 0,
-              file.quality || "1080p",
-              file.language || "English",
-              file.mime_type || "video/mp4",
-              file.season ?? null,
-              file.episode ?? null,
-              file.poster_url || null,
-              file.trailer_url || null
-            ]
-          });
-        } else {
-          await db.execute({
-            sql: `
-              INSERT INTO media_files (
-                movie_id, movie_title, year, telegram_file_id, 
-                telegram_channel_id, telegram_message_id, file_name, 
-                file_size, quality, language, mime_type, season, episode, poster_url, trailer_url
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            args: [
-              file.movie_id || `tg_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-              file.movie_title,
-              file.year || "",
-              file.telegram_file_id || `tg_file_${Date.now()}`,
-              file.telegram_channel_id || "",
-              file.telegram_message_id || "",
-              file.file_name || `${file.movie_title}.mp4`,
-              file.file_size || 0,
-              file.quality || "1080p",
-              file.language || "English",
-              file.mime_type || "video/mp4",
-              file.season ?? null,
-              file.episode ?? null,
-              file.poster_url || null,
-              file.trailer_url || null
-            ]
-          });
-        }
-        restoredCount++;
-      }
-    }
-
-    if (restoredCount > 0) {
-      console.log(`[Vault Backup] Automatically restored ${restoredCount} movies into Vault database.`);
-    }
-    return restoredCount;
-  } catch (err) {
-    console.error("Error in restoreVaultFromDisk:", err);
-    return 0;
-  }
+  return { kind: "file", persistent: !(process.env.K_SERVICE || process.env.NODE_ENV === "production") };
 }
 
 // Setup initial schema
@@ -377,36 +160,13 @@ export async function setupDatabase() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
       type TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at INTEGER
     )
   `);
-
-  // Multi-tier persistence: Restore settings from disk and Firestore
-  try {
-    const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
-    for (const [k, v] of Object.entries(diskSettings)) {
-      if (v && !SECRET_SETTING_KEYS.has(k)) {
-        await db.execute({
-          sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-          args: [k, v]
-        });
-      }
-    }
-
-    const cloudSettings = await getAllAppSettingsFromFirestore();
-    for (const [k, v] of Object.entries(cloudSettings)) {
-      if (v && !SECRET_SETTING_KEYS.has(k)) {
-        await db.execute({
-          sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-          args: [k, v]
-        });
-        diskSettings[k] = v;
-      }
-    }
-    writeJsonFile(SETTINGS_BACKUP_FILE, diskSettings);
-  } catch (err) {
-    console.warn("Could not sync settings during setup:", err);
-  }
+  // Older databases: add the expiry column, then drop anything that has aged out.
+  try { await db.execute("ALTER TABLE callback_cache ADD COLUMN expires_at INTEGER"); } catch { /* column already exists */ }
+  await purgeExpiredCallbacks();
 
   // Ensure default Movies & TV Series vault channel IDs are permanently linked
   const currentVault = await getSetting("telegram_vault_channel_id");
@@ -419,16 +179,12 @@ export async function setupDatabase() {
     await setSetting("telegram_series_vault_channel_id", "-1003983385552");
   }
 
-  // Restore and persist search bots & crawler targets
-  await syncBotsAndTargetsPersistence();
+  // The database is the single source of truth (Turso in production). No mirrors, nothing to restore.
+  if (!process.env.TURSO_DATABASE_URL && (process.env.K_SERVICE || process.env.NODE_ENV === "production")) {
+    console.warn("[DB] WARNING: running on a local file database in a hosted environment. The disk is wiped on every restart. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.");
+  }
 
-  // Restore any persisted files from disk backup if database restarted
-  await restoreVaultFromDisk();
-
-  // Synchronize with Firebase Firestore for durable cloud persistence
-  await syncVaultWithFirestore();
-
-  // Clean up any fake mock records from previous tests and fix mis-titled movies (run AFTER sync so fake records are purged from both SQLite and Firestore)
+  await seedDefaultBotsAndTargets();
   await cleanUpCorruptedVaultRecords();
 }
 
@@ -450,20 +206,11 @@ export async function cleanUpCorruptedVaultRecords(): Promise<void> {
       sql: "SELECT id, telegram_file_id FROM media_files WHERE telegram_file_id LIKE '%USERBOT%' OR telegram_file_id LIKE '%BOT_QUERY%' OR telegram_channel_id = 'AutoVault'"
     })).rows;
 
-    for (const r of fakeRows) {
-      if (r.id) {
-        deleteMediaFileFromFirestore(r.id as number).catch(() => {});
-      }
-      if (r.telegram_file_id) {
-        deleteMediaFileFromFirestore(String(r.telegram_file_id)).catch(() => {});
-      }
-    }
-
     const delRes = await db.execute({
       sql: "DELETE FROM media_files WHERE telegram_file_id LIKE '%USERBOT%' OR telegram_file_id LIKE '%BOT_QUERY%' OR telegram_channel_id = 'AutoVault'"
     });
     if (delRes.rowsAffected > 0) {
-      console.log(`[Vault Cleanup] Removed ${delRes.rowsAffected} fake media file records from SQLite and Firestore.`);
+      console.log(`[Vault Cleanup] Removed ${delRes.rowsAffected} fake media file records.`);
     }
 
     // 2. Fetch all rows and sanitize series titles, seasons, and episodes
@@ -504,13 +251,11 @@ export async function cleanUpCorruptedVaultRecords(): Promise<void> {
           ]
         });
 
-        // Update in-memory record to save to Firestore and backup
         r.movie_title = finalTitle;
         if (finalYear) r.year = finalYear;
         if (finalQuality) r.quality = finalQuality;
         r.season = finalSeason;
         r.episode = finalEpisode;
-        saveMediaFileToFirestore(r).catch(() => {});
         cleanedCount++;
       }
     }
@@ -519,13 +264,13 @@ export async function cleanUpCorruptedVaultRecords(): Promise<void> {
       console.log(`[Vault Cleanup] Sanitized and structured ${cleanedCount} media files (TV Series & Movies).`);
     }
 
-    await syncVaultToDisk();
   } catch (err) {
     console.error("Error in cleanUpCorruptedVaultRecords:", err);
   }
 }
 
-export async function syncBotsAndTargetsPersistence(): Promise<void> {
+/** Creates the bot/target tables and seeds defaults on a brand-new database. Never overwrites existing rows. */
+export async function seedDefaultBotsAndTargets(): Promise<void> {
   try {
     // Ensure table search_bots exists
     await db.execute(`
@@ -557,35 +302,13 @@ export async function syncBotsAndTargetsPersistence(): Promise<void> {
       )
     `);
 
-    // Restore search_bots from disk or Firestore
-    const diskBots = readJsonFile<any[]>(BOTS_BACKUP_FILE, []);
-    const cloudBots = await getAllSearchBotsFromFirestore();
-    const allBots = [...cloudBots, ...diskBots];
-
-    for (const b of allBots) {
-      if (!b.bot_username) continue;
-      await db.execute({
-        sql: `INSERT OR REPLACE INTO search_bots 
-              (bot_username, bot_type, command_template, status, priority, success_count) 
-              VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [
-          b.bot_username,
-          b.bot_type || "command",
-          b.command_template || "/search {query}",
-          b.status || "active",
-          Number(b.priority || 1),
-          Number(b.success_count || 0)
-        ]
-      });
-    }
-
-    // If still empty, seed default search bots
+    // Seed default search bots on a brand-new database only
     const botRows = (await db.execute("SELECT * FROM search_bots")).rows;
     if (botRows.length === 0) {
       const defaults = [
         { bot_username: "@Apple_moviebot", bot_type: "command", command_template: "/search {query}", priority: 1 },
-        { bot_username: "@iPapkornDeltaBot", bot_type: "command", command_template: "/search {query}", priority: 2 },
-        { bot_username: "@iPapkornEzPzBot", bot_type: "command", command_template: "/search {query}", priority: 3 },
+        { bot_username: "@iPapkornDeltaBot", bot_type: "command", command_template: "{query}", priority: 2 },
+        { bot_username: "@iPapkornEzPzBot", bot_type: "command", command_template: "{query}", priority: 3 },
         { bot_username: "@cinemagic_hd_bot", bot_type: "command", command_template: "/search {query}", priority: 4 }
       ];
       for (const d of defaults) {
@@ -594,32 +317,6 @@ export async function syncBotsAndTargetsPersistence(): Promise<void> {
           args: [d.bot_username, d.bot_type, d.command_template, d.priority]
         });
       }
-    }
-
-    const currentBots = (await db.execute("SELECT * FROM search_bots")).rows;
-    writeJsonFile(BOTS_BACKUP_FILE, currentBots);
-    saveSearchBotsToFirestore(currentBots as any[]).catch(() => {});
-
-    // Restore crawler_targets from disk or Firestore
-    const diskTargets = readJsonFile<any[]>(TARGETS_BACKUP_FILE, []);
-    const cloudTargets = await getAllCrawlerTargetsFromFirestore();
-    const allTargets = [...cloudTargets, ...diskTargets];
-
-    for (const t of allTargets) {
-      if (!t.channel_identifier) continue;
-      await db.execute({
-        sql: `INSERT OR REPLACE INTO crawler_targets 
-              (channel_identifier, title, status, min_file_size_mb, quality_filter, total_files_found) 
-              VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [
-          t.channel_identifier,
-          t.title || t.channel_identifier,
-          t.status || "active",
-          Number(t.min_file_size_mb || 300),
-          t.quality_filter || "all",
-          Number(t.total_files_found || 0)
-        ]
-      });
     }
 
     // Seed real target channels if empty
@@ -638,48 +335,15 @@ export async function syncBotsAndTargetsPersistence(): Promise<void> {
         });
       }
     }
-
-    const currentTargets = (await db.execute("SELECT * FROM crawler_targets")).rows;
-    writeJsonFile(TARGETS_BACKUP_FILE, currentTargets);
-    saveCrawlerTargetsToFirestore(currentTargets as any[]).catch(() => {});
   } catch (err) {
-    console.warn("Could not sync bots and targets persistence:", err);
+    console.warn("Could not seed default bots and targets:", err);
   }
 }
 
 export async function getSetting(key: string): Promise<string | null> {
   try {
-    // 1. Check local SQLite
-    const res = await db.execute({
-      sql: "SELECT value FROM app_settings WHERE key = ? LIMIT 1",
-      args: [key]
-    });
-    if (res.rows && res.rows.length > 0 && res.rows[0].value) {
-      return String(res.rows[0].value);
-    }
-    if (SECRET_SETTING_KEYS.has(key)) return null; // never fall back to disk/Firestore mirrors for secrets
-
-    // 2. Check local disk backup
-    const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
-    if (diskSettings[key]) {
-      await db.execute({
-        sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-        args: [key, diskSettings[key]]
-      });
-      return diskSettings[key];
-    }
-
-    // 3. Check persistent Firebase Firestore
-    const cloudValue = await getAppSettingFromFirestore(key);
-    if (cloudValue) {
-      await db.execute({
-        sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-        args: [key, cloudValue]
-      });
-      diskSettings[key] = cloudValue;
-      writeJsonFile(SETTINGS_BACKUP_FILE, diskSettings);
-      return cloudValue;
-    }
+    const res = await db.execute({ sql: "SELECT value FROM app_settings WHERE key = ? LIMIT 1", args: [key] });
+    if (res.rows && res.rows.length > 0 && res.rows[0].value) return String(res.rows[0].value);
   } catch (err) {
     console.warn("Could not retrieve setting " + key + ":", err);
   }
@@ -688,22 +352,9 @@ export async function getSetting(key: string): Promise<string | null> {
 
 export async function setSetting(key: string, value: string): Promise<void> {
   try {
-    // 1. Save to SQLite
     await db.execute({
       sql: "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
       args: [key, value]
-    });
-
-    if (SECRET_SETTING_KEYS.has(key)) return; // secrets live only in the database (or env), never in mirrors
-
-    // 2. Save to local disk backup
-    const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
-    diskSettings[key] = value;
-    writeJsonFile(SETTINGS_BACKUP_FILE, diskSettings);
-
-    // 3. Save to Firebase Firestore (permanent cloud persistence)
-    saveAppSettingToFirestore(key, value).catch(err => {
-      console.warn(`[Firestore] Background save for setting ${key} failed:`, err);
     });
   } catch (err) {
     console.error("Could not save setting " + key + ":", err);
@@ -712,14 +363,7 @@ export async function setSetting(key: string, value: string): Promise<void> {
 
 export async function deleteSetting(key: string): Promise<void> {
   try {
-    await db.execute({
-      sql: "DELETE FROM app_settings WHERE key = ?",
-      args: [key]
-    });
-    const diskSettings = readJsonFile<Record<string, string>>(SETTINGS_BACKUP_FILE, {});
-    delete diskSettings[key];
-    writeJsonFile(SETTINGS_BACKUP_FILE, diskSettings);
-    deleteAppSettingFromFirestore(key).catch(() => {});
+    await db.execute({ sql: "DELETE FROM app_settings WHERE key = ?", args: [key] });
   } catch (err) {
     console.error("Could not delete setting " + key + ":", err);
   }
@@ -831,12 +475,7 @@ export async function searchVaultFilesDirect(query: string): Promise<MediaFileRe
 
 export async function getAllMediaFiles(): Promise<MediaFileRecord[]> {
   try {
-    let res = await db.execute("SELECT * FROM media_files ORDER BY created_at DESC");
-    if (res.rows.length === 0) {
-      // If local cache was cleared or reset, sync from Firestore immediately
-      await syncVaultWithFirestore();
-      res = await db.execute("SELECT * FROM media_files ORDER BY created_at DESC");
-    }
+    const res = await db.execute("SELECT * FROM media_files ORDER BY created_at DESC");
     return res.rows as unknown as MediaFileRecord[];
   } catch (err) {
     console.error("Error getting all media files:", err);
@@ -1073,12 +712,10 @@ export async function sanitizeAndStructureAllSeries(): Promise<{ total: number; 
         if (finalQuality) r.quality = finalQuality;
         r.season = finalSeason;
         r.episode = finalEpisode;
-        saveMediaFileToFirestore(r).catch(() => {});
         seriesUpdated++;
       }
     }
 
-    await syncVaultToDisk();
     console.log(`[Series Intelligence] Structured and organized ${seriesUpdated} media records across TV series and movies.`);
     return { total: allRows.length, seriesUpdated };
   } catch (err) {
@@ -1245,22 +882,6 @@ export async function addMediaFile(file: Omit<MediaFileRecord, "id" | "created_a
   });
   const insertId = Number(res.lastInsertRowid || 0);
   
-  // Persist backup to disk immediately
-  syncVaultToDisk().catch(() => {});
-
-  // Persist to Firebase Firestore for permanent cloud durability
-  saveMediaFileToFirestore({
-    ...file,
-    id: insertId,
-    movie_title,
-    year,
-    quality,
-    season,
-    episode
-  }).catch((e) => {
-    console.warn("Failed to save media file to Firestore:", e);
-  });
-
   return insertId;
 }
 
@@ -1270,8 +891,6 @@ export async function deleteMediaFile(id: number): Promise<boolean> {
       sql: "DELETE FROM media_files WHERE id = ?",
       args: [id]
     });
-    syncVaultToDisk().catch(() => {});
-    deleteMediaFileFromFirestore(id).catch(() => {});
     return true;
   } catch (err) {
     console.error("Error deleting media file:", err);
@@ -1307,7 +926,6 @@ export async function importVaultData(items: any[]): Promise<number> {
       count++;
     }
   }
-  await syncVaultToDisk();
   return count;
 }
 
@@ -1526,11 +1144,14 @@ export async function clearChatEphemeralMessagesFromDb(chatId: string | number):
   }
 }
 
-export async function setCallbackKey(key: string, value: string, type: string = "general"): Promise<void> {
+const DAY_S = 86400;
+
+/** Stores a value behind a short key (Telegram callback data is limited to 64 bytes). Expires after `ttlSeconds`. */
+export async function setCallbackKey(key: string, value: string, type: string = "general", ttlSeconds: number = 30 * DAY_S): Promise<void> {
   try {
     await db.execute({
-      sql: `INSERT OR REPLACE INTO callback_cache (key, value, type, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
-      args: [key, value, type]
+      sql: `INSERT OR REPLACE INTO callback_cache (key, value, type, created_at, expires_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+      args: [key, value, type, Math.floor(Date.now() / 1000) + ttlSeconds]
     });
   } catch (err: any) {
     console.warn("setCallbackKey error:", err?.message);
@@ -1540,12 +1161,21 @@ export async function setCallbackKey(key: string, value: string, type: string = 
 export async function getCallbackKey(key: string): Promise<string | null> {
   try {
     const res = await db.execute({
-      sql: `SELECT value FROM callback_cache WHERE key = ?`,
-      args: [key]
+      sql: `SELECT value FROM callback_cache WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)`,
+      args: [key, Math.floor(Date.now() / 1000)]
     });
     return res.rows[0]?.value ? String(res.rows[0].value) : null;
   } catch {
     return null;
+  }
+}
+
+export async function purgeExpiredCallbacks(): Promise<number> {
+  try {
+    const res = await db.execute({ sql: "DELETE FROM callback_cache WHERE expires_at IS NOT NULL AND expires_at < ?", args: [Math.floor(Date.now() / 1000)] });
+    return res.rowsAffected;
+  } catch {
+    return 0;
   }
 }
 

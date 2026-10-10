@@ -5,6 +5,8 @@ import {
   setupDatabase,
   db,
   getAllMediaFiles,
+  getDatabaseInfo,
+  purgeExpiredCallbacks,
   addMediaFile,
   deleteMediaFile,
   getChannelLogs,
@@ -19,7 +21,6 @@ import {
   removeFileFromCollection,
   getCollectionItems,
   importVaultData,
-  syncVaultWithFirestore,
   getVaultCatalogGrouped,
   getVaultSeriesCatalog,
   getSeriesSeasonEpisodes,
@@ -425,7 +426,7 @@ async function startServer() {
         hasTelegramToken: !!process.env.TELEGRAM_BOT_TOKEN,
         metadataProvider: provider,
         metadataReady: true,
-        firebaseConnected: true,
+        database: getDatabaseInfo(),
         stats: {
           users: usersCount,
           searches: searchesCount,
@@ -444,17 +445,6 @@ async function startServer() {
     }
   });
 
-  // Manual Firebase Firestore cloud sync endpoint
-  app.post("/api/firebase/sync", async (req, res) => {
-    try {
-      await syncVaultWithFirestore();
-      const files = await getAllMediaFiles();
-      res.json({ success: true, count: files.length, message: "Firestore synchronization completed." });
-    } catch (err: any) {
-      console.error("Firebase sync error:", err);
-      res.status(500).json({ error: err?.message || "Sync failed" });
-    }
-  });
 
   // Telegram Library Endpoints (Phase 2 & TV Series Grouping)
   app.get("/api/library", async (req, res) => {
@@ -1290,6 +1280,9 @@ async function startServer() {
   });
 
   // Periodic intelligent re-engagement (Every 6 hours)
+  // Housekeeping: drop expired button data every 6 hours
+  setInterval(() => { purgeExpiredCallbacks().catch(() => {}); }, 6 * 3600 * 1000).unref?.();
+
   setInterval(async () => {
     if (bot) {
       try {

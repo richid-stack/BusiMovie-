@@ -61,6 +61,7 @@ export interface TelegramUpdateLog {
 
 export interface Status {
   botRunning: boolean;
+  database?: { kind: "turso" | "file"; persistent: boolean; host?: string };
   stats: {
     users: number;
     searches: number;

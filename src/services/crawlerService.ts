@@ -159,8 +159,8 @@ export async function initCrawlerService() {
       )
     `);
 
-    // Restore any persistent batch queue items from disk backup and reset interrupted 'processing' items
-    await restoreQueueFromDisk();
+    // Resume items that were mid-flight when the server last stopped
+    await resetInterruptedQueueItems();
 
     // Load targets
     const targetRows = (await db.execute("SELECT * FROM crawler_targets ORDER BY id ASC")).rows;
@@ -2717,9 +2717,6 @@ export async function parseAndQueueCsvMovies(csvContent: string, sourceName: str
     status: "success"
   });
 
-  // Persist updated queue to disk
-  await backupQueueToDisk();
-
   return {
     totalParsed,
     queued,
@@ -2974,7 +2971,6 @@ export async function processCronBatch(limit: number = 5, isManualTrigger: boole
     console.error("[CronCrawler] Batch error:", batchErr);
   } finally {
     cronConfig.isRunningBatch = false;
-    await backupQueueToDisk();
   }
 
   return {
@@ -3114,7 +3110,6 @@ export async function clearCronBatchQueue(type: "all" | "completed" | "failed" =
     } else if (type === "failed") {
       await db.execute("DELETE FROM crawler_batch_queue WHERE status = 'failed'");
     }
-    await backupQueueToDisk();
     return true;
   } catch (_) {
     return false;
@@ -3132,7 +3127,6 @@ export async function requeueBatchQueue(type: "failed" | "skipped" | "all" = "al
       sql = "UPDATE crawler_batch_queue SET status = 'pending', attempts = 0, last_error = NULL WHERE status = 'duplicate_skipped'";
     }
     const res = await db.execute(sql);
-    await backupQueueToDisk();
     return Number(res.rowsAffected) || 0;
   } catch (err: any) {
     console.warn("Re-queue batch error:", err.message);
@@ -3140,76 +3134,17 @@ export async function requeueBatchQueue(type: "failed" | "skipped" | "all" = "al
   }
 }
 
-const QUEUE_BACKUP_FILE = path.join(process.cwd(), "queue_backup.json");
 
 /**
- * Persist the entire crawler_batch_queue to disk so batches survive container restarts.
+ * On boot, items that were mid-flight when the server stopped go back to 'pending' so the crawl resumes.
+ * (The queue lives in the database; there is no disk copy.)
  */
-export async function backupQueueToDisk(): Promise<void> {
+export async function resetInterruptedQueueItems(): Promise<void> {
   try {
-    const rows = (await db.execute("SELECT * FROM crawler_batch_queue ORDER BY id ASC")).rows;
-    fs.writeFileSync(QUEUE_BACKUP_FILE, JSON.stringify(rows, null, 2), "utf-8");
+    const res = await db.execute("UPDATE crawler_batch_queue SET status = 'pending' WHERE status = 'processing'");
+    if (res.rowsAffected > 0) console.log(`[CrawlerQueue] Reset ${res.rowsAffected} interrupted 'processing' items back to 'pending'.`);
   } catch (err: any) {
-    console.warn("[CrawlerQueue] Failed to backup queue to disk:", err.message);
-  }
-}
-
-/**
- * Restore crawler_batch_queue from disk upon container boot.
- * Crucially resets any interrupted 'processing' items back to 'pending' so crawl resumes!
- */
-export async function restoreQueueFromDisk(): Promise<void> {
-  try {
-    // 1. If SQLite already has rows in crawler_batch_queue, reset any interrupted 'processing' items back to 'pending'
-    const countRes = (await db.execute("SELECT COUNT(*) as cnt FROM crawler_batch_queue")).rows[0] as any;
-    const currentCount = Number(countRes?.cnt || 0);
-
-    if (currentCount > 0) {
-      const resetRes = await db.execute("UPDATE crawler_batch_queue SET status = 'pending' WHERE status = 'processing'");
-      if (resetRes.rowsAffected > 0) {
-        console.log(`[CrawlerQueue] Reset ${resetRes.rowsAffected} interrupted 'processing' items back to 'pending'.`);
-        await backupQueueToDisk();
-      }
-      return;
-    }
-
-    // 2. If table is empty, check if backup file exists on disk
-    if (!fs.existsSync(QUEUE_BACKUP_FILE)) {
-      return;
-    }
-
-    const raw = fs.readFileSync(QUEUE_BACKUP_FILE, "utf-8");
-    const items = JSON.parse(raw);
-    if (!Array.isArray(items) || items.length === 0) return;
-
-    let restored = 0;
-    for (const item of items) {
-      // If item was mid-flight ('processing') when backed up, reset to 'pending' so it can continue seamlessly!
-      const status = item.status === "processing" ? "pending" : (item.status || "pending");
-      await db.execute({
-        sql: `INSERT OR REPLACE INTO crawler_batch_queue 
-              (id, raw_title, clean_title, year, requested_quality, status, attempts, last_error, bot_used, media_file_id, source_csv, created_at, updated_at) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)`,
-        args: [
-          item.id,
-          item.raw_title || item.clean_title,
-          item.clean_title,
-          item.year || null,
-          item.requested_quality || "1080p",
-          status,
-          item.attempts || 0,
-          item.last_error || null,
-          item.bot_used || null,
-          item.media_file_id || null,
-          item.source_csv || "backup",
-          item.created_at || null
-        ]
-      });
-      restored++;
-    }
-    console.log(`[CrawlerQueue] Restored ${restored} batch queue items from disk backup.`);
-  } catch (err: any) {
-    console.warn("[CrawlerQueue] Failed to restore queue from disk:", err.message);
+    console.warn("[CrawlerQueue] Could not reset interrupted items:", err.message);
   }
 }
 

@@ -35,8 +35,6 @@ export default function AdminDashboard() {
   const [detectedUrl, setDetectedUrl] = useState<string>("");
   const [customWebhookUrl, setCustomWebhookUrl] = useState<string>("");
   const [webhookLoading, setWebhookLoading] = useState(false);
-  const [cloudSyncLoading, setCloudSyncLoading] = useState(false);
-  const [cloudSyncMsg, setCloudSyncMsg] = useState<string | null>(null);
   const [engagementLoading, setEngagementLoading] = useState(false);
   const [engagementMsg, setEngagementMsg] = useState<string | null>(null);
   const [broadcastMsg, setBroadcastMsg] = useState("");
@@ -663,25 +661,6 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleTriggerCloudSync = async () => {
-    setCloudSyncLoading(true);
-    setCloudSyncMsg(null);
-    try {
-      const res = await fetch("/api/firebase/sync", { method: "POST" });
-      const data = await res.json();
-      if (res.ok) {
-        setCloudSyncMsg(`Synced ${data.count} movies.`);
-        fetchData();
-      } else {
-        setCloudSyncMsg("Sync failed: " + data.error);
-      }
-    } catch (err: any) {
-      setCloudSyncMsg("Sync error: " + err.message);
-    } finally {
-      setCloudSyncLoading(false);
-    }
-  };
-
   const handleTriggerReEngagement = async () => {
     setEngagementLoading(true);
     setEngagementMsg(null);
@@ -1170,7 +1149,7 @@ export default function AdminDashboard() {
             {/* Infrastructure Control Panel */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               
-              {/* Firebase Persistence Card */}
+              {/* Database Card */}
               <div className="bg-zinc-900/50 border border-zinc-800/80 p-8 rounded-3xl flex flex-col justify-between relative overflow-hidden">
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -1179,29 +1158,19 @@ export default function AdminDashboard() {
                         <Database className="w-6 h-6" />
                       </div>
                       <div>
-                        <h2 className="text-lg font-bold text-zinc-100">Google Cloud Firestore</h2>
-                        <p className="text-xs text-zinc-500">Persistent Cloud Database & Backup</p>
+                        <h2 className="text-lg font-bold text-zinc-100">Database</h2>
+                        <p className="text-xs text-zinc-500">{status?.database?.kind === "turso" ? `Turso${status.database.host ? ` · ${status.database.host}` : ""}` : "Local file (movie-bot.db)"}</p>
                       </div>
                     </div>
-                    <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-bold rounded-full flex items-center gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5" /> Synchronized
+                    <span className={`px-3 py-1 text-xs font-bold rounded-full flex items-center gap-1.5 border ${status?.database?.persistent ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : "bg-red-500/10 text-red-400 border-red-500/30"}`}>
+                      <ShieldCheck className="w-3.5 h-3.5" /> {status?.database?.persistent ? "Persistent" : "Temporary"}
                     </span>
                   </div>
                   <p className="text-sm text-zinc-400 leading-relaxed">
-                    All indexed movies, requests, and Telegram file references are continuously mirrored to Firestore for high availability across deployments.
+                    {status?.database?.persistent
+                      ? "Everything — titles, requests, settings, bots — is stored in one database and survives restarts."
+                      : "This deployment is using a local file that is wiped whenever the server restarts. Add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN to your secrets to keep your data."}
                   </p>
-                </div>
-                
-                <div className="pt-6 border-t border-zinc-800/60 flex items-center justify-between mt-6">
-                  <span className="text-xs text-zinc-500">{cloudSyncMsg || "Syncs every boot automatically"}</span>
-                  <button 
-                    onClick={handleTriggerCloudSync} 
-                    disabled={cloudSyncLoading}
-                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-xs font-semibold transition flex items-center gap-2 disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${cloudSyncLoading ? "animate-spin text-amber-400" : ""}`} />
-                    {cloudSyncLoading ? "Syncing..." : "Force Sync Now"}
-                  </button>
                 </div>
               </div>
 
@@ -2865,7 +2834,7 @@ export default function AdminDashboard() {
                   <HardDrive className="w-5 h-5 text-red-500" /> Vault Inventory & Library
                 </h2>
                 <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">
-                  {libraryFiles.length} media files archived in private Telegram vault channel and Firestore.
+                  {libraryFiles.length} media files archived in your private Telegram vault channel.
                 </p>
               </div>
               

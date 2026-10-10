@@ -120,6 +120,17 @@ function hashString(str: string): number {
 
 // In-memory caches for Telegram inline button limits (max 64 bytes) backed by SQLite callback_cache
 const titleCache = new Map<string, string>();
+function rememberTitle(id: string, title: string) {
+  titleCache.set(id, title);
+  setCallbackKey(`t_${id}`, title, "title", 7 * 86400).catch(() => {});
+}
+async function resolveTitleById(id: string): Promise<string | null> {
+  const mem = titleCache.get(id);
+  if (mem) return mem;
+  const stored = await getCallbackKey(`t_${id}`);
+  if (stored) titleCache.set(id, stored);
+  return stored;
+}
 const showKeyCache = new Map<string, string>();
 const showTitleToKey = new Map<string, string>();
 
@@ -201,11 +212,20 @@ async function resolveQuery(key: string): Promise<string> {
 }
 
 const botRespCache = new Map<string, { botUsername: string; messageId: number; buttons: any[]; query: string }>();
-let botRespCounter = 1;
-function saveBotResponse(data: { botUsername: string; messageId: number; buttons: any[]; query: string }): string {
-  const key = `b${botRespCounter++}`;
+type BotResp = { botUsername: string; messageId: number; buttons: any[]; query: string };
+/** Random key (a counter would restart at 1 after a deploy and old buttons would point at the wrong results). */
+function saveBotResponse(data: BotResp): string {
+  const key = `b${Math.random().toString(36).slice(2, 10)}`;
   botRespCache.set(key, data);
+  setCallbackKey(key, JSON.stringify(data), "botresp", 2 * 3600).catch(() => {});
   return key;
+}
+async function loadBotResponse(key: string): Promise<BotResp | null> {
+  const mem = botRespCache.get(key);
+  if (mem) return mem;
+  const raw = await getCallbackKey(key);
+  if (!raw) return null;
+  try { const parsed = JSON.parse(raw) as BotResp; botRespCache.set(key, parsed); return parsed; } catch { return null; }
 }
 
 export interface TelegramUpdateLog {
@@ -943,27 +963,14 @@ export function initializeBot(): Telegraf | null {
     } catch (err) {}
   }, 5000);
 
-  // Universal 2-Minute Ephemeral Delivery Protection on Telegram Prototype (Intercepts all ctx.reply & bot methods)
+  // 2-minute privacy timer for delivered media (intercepts media send methods only)
   const origProtoCallApi = Telegram.prototype.callApi;
   Telegram.prototype.callApi = async function (method: string, payload: any) {
     const res: any = await origProtoCallApi.call(this, method, payload);
 
-    const msgMethods = [
-      "sendMessage",
-      "sendPhoto",
-      "sendVideo",
-      "sendDocument",
-      "sendAudio",
-      "sendAnimation",
-      "sendVoice",
-      "sendSticker",
-      "sendDice",
-      "sendPoll",
-      "copyMessage",
-      "editMessageText",
-      "editMessageCaption",
-      "editMessageMedia"
-    ];
+    // Only delivered media self-destructs. Menus, search results, request confirmations and
+    // "your title is ready" notifications must stay, so no text/edit/sticker/poll methods here.
+    const msgMethods = ["sendVideo", "sendDocument", "sendAudio", "sendAnimation", "copyMessage"];
 
     if (msgMethods.includes(method) && payload) {
       const chatId = payload.chat_id;
@@ -1072,7 +1079,7 @@ export function initializeBot(): Telegraf | null {
         }
       } else if (payload.startsWith("req_")) {
         const reqMovieId = payload.replace("req_", "");
-        const movieTitle = titleCache.get(reqMovieId) || reqMovieId;
+        const movieTitle = (await resolveTitleById(reqMovieId)) || reqMovieId;
         await db.execute({
           sql: "INSERT INTO requests (telegram_id, tmdb_id, title) VALUES (?, ?, ?)",
           args: [ctx.from.id.toString(), reqMovieId, movieTitle]
@@ -1800,7 +1807,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
   bot.action(/^request_(.+)$/, async (ctx) => {
     await ensureUser(ctx);
     const movieId = ctx.match[1];
-    const movieTitle = titleCache.get(movieId) || `Movie ${movieId}`;
+    const movieTitle = (await resolveTitleById(movieId)) || `Movie ${movieId}`;
     await triggerAutonomousCrawlerFlow(ctx, movieTitle, movieId);
   });
 
@@ -1820,7 +1827,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
     const col = parseInt(ctx.match[3], 10);
     const reqId = parseInt(ctx.match[4], 10);
 
-    const cached = botRespCache.get(respKey);
+    const cached = await loadBotResponse(respKey);
     if (!cached) {
       return ctx.answerCbQuery(M.selectionExpired());
     }
@@ -2612,7 +2619,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
       const results = await searchMovies(query);
       const inlineResults = await Promise.all(
         results.slice(0, 8).map(async (movie) => {
-          titleCache.set(movie.id, movie.title);
+          rememberTitle(movie.id, movie.title);
           const libFiles = await getMediaFilesForMovie(movie.id, movie.title);
           const inVault = libFiles.length > 0;
           const isShow = isTvSeriesEntity(movie);
@@ -2816,7 +2823,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
         ]);
       } else {
         const mKey = getMovieKey(item.title, item.year);
-        titleCache.set(item.id, item.title);
+        rememberTitle(item.id, item.title);
         resultButtons.push([
           Markup.button.callback(`${icon} ${item.title}${yr}`, `mov_sel_${mKey}`)
         ]);
