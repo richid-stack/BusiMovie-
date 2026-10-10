@@ -254,25 +254,8 @@ let pendingPhoneCodeHash = "";
 let activeClient: TelegramClient | null = null;
 let activeUserInfo: { id?: string; username?: string; firstName?: string; phone?: string } | null = null;
 
-// Mutex to ensure external bot interactions (e.g. @quinsonnbot, search bots) are serialized
-const botMutexMap = new Map<string, Promise<any>>();
-
-export async function withBotLock<T>(botHandle: string, task: () => Promise<T>): Promise<T> {
-  const key = botHandle.toLowerCase().trim();
-  const currentLock = botMutexMap.get(key) || Promise.resolve();
-  let release: () => void;
-  const nextLock = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  botMutexMap.set(key, currentLock.then(() => nextLock, () => nextLock));
-
-  try {
-    await currentLock;
-    return await task();
-  } finally {
-    release!();
-  }
-}
+export { withBotLock } from "../crawler/lock.js";
+import { withBotLock } from "../crawler/lock.js";
 
 export async function getEffectiveVaultChannelId(isSeries?: boolean): Promise<string> {
   if (isSeries) {
