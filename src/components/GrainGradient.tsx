@@ -60,6 +60,8 @@ export function paintGrainGradient(canvas: HTMLCanvasElement, w: number, h: numb
         else if (b.c === EMBER.amber) wa += wgt;
         else wr += wgt;
       }
+      // Sharpen: cores stay pure, only the borders between colours are speckled (like the reference).
+      wp = Math.pow(wp, 2.2); wr = Math.pow(wr, 2.2); wa = Math.pow(wa, 2.2);
       const total = wp + wr + wa + 1e-6;
       // Stochastic choice: probability == weight. This is what creates the speckled boundaries.
       // `grain` widens the noisy transition zone.
@@ -120,11 +122,11 @@ export default function GrainGradient({ className = "", seed = 7, grainSize = 2.
   }, [seed, grainSize]);
 
   return (
-    <div ref={wrapRef} className={`relative overflow-hidden ${className}`}>
+    <div ref={wrapRef} className={`${/\b(absolute|fixed)\b/.test(className) ? "" : "relative"} overflow-hidden ${className}`}>
       <canvas
         ref={canvasRef}
         aria-hidden="true"
-        className={`absolute left-1/2 top-1/2 h-[125%] w-[125%] -translate-x-1/2 -translate-y-1/2 ${drift ? "bm-drift" : ""}`}
+        className={`absolute -left-[12.5%] -top-[12.5%] h-[125%] w-[125%] ${drift ? "bm-drift" : ""}`}
         style={{ imageRendering: "pixelated" }}
       />
       <div className="relative z-10 h-full w-full">{children}</div>

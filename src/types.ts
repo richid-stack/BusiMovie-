@@ -17,6 +17,9 @@ export interface MediaFile {
   total_episodes?: number;
   seasons?: number[];
   episodes?: MediaFile[];
+  overview?: string;
+  created_at?: string;
+  views?: number;
   all_qualities?: Array<{ id: number; quality: string; file_size: number; file_name?: string }>;
 }
 
