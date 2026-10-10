@@ -32,18 +32,31 @@ import {
 } from "../db/index.js";
 import { getAIMovieRecommendations, analyzeUserIntent, generateMoviePostWatchFollowUp } from "../services/gemini.js";
 import { isAdminTelegramId, getWebhookSecret } from "../server/auth.js";
-import {
-  testQuerySearchBot,
-  fetchAndForwardBotMedia,
-  dispatchAutomatedSearch,
-  getSearchBots,
-  fetchSeriesFromQuinson,
-  getQuinsonSeriesSeasons,
-  getQuinsonSeasonEpisodes,
-  isBackOrNavButton,
-  selectBestMatchingButton,
-  normalizeTitleFuzzy
-} from "../services/crawlerService.js";
+import { normalizeTitleFuzzy } from "../crawler/verify.js";
+import { requestAndWait, submitJob, listSeasons, listEpisodes, setJobNotifier, setProgressHook, PRIORITY } from "../crawler/service.js";
+import { waitForJob } from "../crawler/jobs.js";
+
+/** jobId → callback that reports how many season episodes have arrived so far */
+const seasonProgress = new Map<number, (count: number) => Promise<void>>();
+setProgressHook((job, count) => seasonProgress.get(job.id)?.(count));
+// When a crawl finishes, tell everyone who asked for that title and went away.
+setJobNotifier(async (job, outcome) => {
+  const b = getBotInstance();
+  if (!b || outcome.status !== "done") return;
+  const id = outcome.result?.mediaFileId ?? outcome.result?.episodes?.[0]?.mediaFileId;
+  if (!id) return;
+  const row = (await db.execute({ sql: "SELECT movie_title, year, quality FROM media_files WHERE id = ?", args: [id] })).rows[0] as any;
+  if (!row) return;
+  await notifyRequestingUsers(b, job.title || row.movie_title, Number(id), String(row.quality || "HD"), row.year || undefined);
+});
+
+/** Season/episode numbers the series bot offers, in the shape the pickers expect. */
+async function listEpisodesLabeled(title: string, season: number): Promise<Array<{ episodeNum: number; label: string }>> {
+  return (await listEpisodes(title, season)).map((n) => ({ episodeNum: n, label: `Episode ${n}` }));
+}
+const mediaIdOf = (job: { result_json: string | null } | null): number | undefined => {
+  try { const r = JSON.parse(job?.result_json || "{}"); return r.mediaFileId ?? r.episodes?.[0]?.mediaFileId; } catch { return undefined; }
+};
 
 // Universal 2-Minute Ephemeral Message Management (120 seconds)
 export const EPHEMERAL_TTL_MS = 120000;
@@ -209,23 +222,6 @@ async function resolveQuery(key: string): Promise<string> {
     return dbVal;
   }
   return key;
-}
-
-const botRespCache = new Map<string, { botUsername: string; messageId: number; buttons: any[]; query: string }>();
-type BotResp = { botUsername: string; messageId: number; buttons: any[]; query: string };
-/** Random key (a counter would restart at 1 after a deploy and old buttons would point at the wrong results). */
-function saveBotResponse(data: BotResp): string {
-  const key = `b${Math.random().toString(36).slice(2, 10)}`;
-  botRespCache.set(key, data);
-  setCallbackKey(key, JSON.stringify(data), "botresp", 2 * 3600).catch(() => {});
-  return key;
-}
-async function loadBotResponse(key: string): Promise<BotResp | null> {
-  const mem = botRespCache.get(key);
-  if (mem) return mem;
-  const raw = await getCallbackKey(key);
-  if (!raw) return null;
-  try { const parsed = JSON.parse(raw) as BotResp; botRespCache.set(key, parsed); return parsed; } catch { return null; }
 }
 
 export interface TelegramUpdateLog {
@@ -1562,28 +1558,6 @@ export function initializeBot(): Telegraf | null {
     }
   });
 
-// Release label beautifier: strips ugly channel tags, bot names, brackets into cinema-grade badges
-function cleanReleaseButtonLabel(rawText: string): string {
-  const sizeMatch = rawText.match(/\[?([\d\.]+\s*(?:GB|MB))\]?/i);
-  const sizeStr = sizeMatch ? sizeMatch[1].toUpperCase().replace(/\s+/, " ") : "";
-
-  const resMatch = rawText.match(/\b(2160p|4K|1080p|720p|480p)\b/i);
-  let resStr = resMatch ? resMatch[1].toLowerCase() : "";
-  if (resStr === "4k" || resStr === "2160p") resStr = "4K UHD";
-  else if (resStr === "1080p") resStr = "1080p Full HD";
-  else if (resStr === "720p") resStr = "720p HD";
-  else if (resStr === "480p") resStr = "480p Standard";
-  else resStr = "HD Master";
-
-  const sourceMatch = rawText.match(/\b(BluRay|BRRip|WEB-DL|WEBRip|x265|HEVC|10Bit)\b/i);
-  const sourceStr = sourceMatch ? ` • ${sourceMatch[1]}` : "";
-
-  if (sizeStr) {
-    return `💿 ${resStr}${sourceStr} (${sizeStr})`;
-  }
-  return `💿 ${resStr}${sourceStr}`;
-}
-
   // Helper for autonomous crawler request and quality selection
   async function triggerAutonomousCrawlerFlow(ctx: any, targetTitle: string, tmdbId?: string) {
     if (!ctx.from) return;
@@ -1603,7 +1577,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
 
     // Insert request record
     const insRes = await db.execute({
-      sql: "INSERT INTO requests (telegram_id, tmdb_id, title, status) VALUES (?, ?, ?, 'searching')",
+      sql: "INSERT INTO requests (telegram_id, tmdb_id, title, status) VALUES (?, ?, ?, 'waiting')",
       args: [userId, tmdbId || "", cleanTitle]
     });
     const reqId = Number(insRes.lastInsertRowid || 0);
@@ -1636,12 +1610,17 @@ function cleanReleaseButtonLabel(rawText: string): string {
       try {
         await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.searching(cleanTitle), { parse_mode: "HTML" }).catch(() => {});
 
-        const quinsonRes = await fetchSeriesFromQuinson({ seriesTitle: cleanTitle });
-        if (quinsonRes.success && quinsonRes.firstMediaFileId) {
-          await markRequestsFulfilled([reqId]);
-          await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          await deliverMediaFile(ctx, quinsonRes.firstMediaFileId);
-          return;
+        const seasons = await listSeasons(cleanTitle);
+        const eps = seasons.length ? await listEpisodes(cleanTitle, seasons[0]) : [];
+        if (eps.length) {
+          const { id, job } = await requestAndWait({ kind: "episode", title: cleanTitle, season: seasons[0], episode: eps[0], priority: PRIORITY.user, source: "user", requestedBy: userId }, 120_000);
+          const fileId = job?.status === "done" ? mediaIdOf(job) : undefined;
+          if (fileId) {
+            await markRequestsFulfilled([reqId]);
+            await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+            await deliverMediaFile(ctx, fileId);
+            return;
+          }
         }
       } catch (seriesErr: any) {
         console.warn("[CrawlerFlow] Quinson series query failed:", seriesErr?.message);
@@ -1664,139 +1643,40 @@ function cleanReleaseButtonLabel(rawText: string): string {
     }
 
     try {
-      const bots = await getSearchBots();
-      const activeBots = bots
-        .filter(b => b.status === 'active' && !b.bot_username.toLowerCase().includes("quinson"))
-        .sort((a, b) => (a.priority || 1) - (b.priority || 1));
-
-      const botList = activeBots.length > 0 ? activeBots : [
-        { bot_username: "@Apple_moviebot", priority: 1 },
-        { bot_username: "@iPapkornDeltaBot", priority: 2 },
-        { bot_username: "@iPapkornEzPzBot", priority: 3 }
-      ];
-
-      let foundResult: any = null;
-      let usedBotName = "";
-
-      for (const bot of botList) {
-        usedBotName = bot.bot_username;
-
-        try {
-          const searchRes = await testQuerySearchBot(usedBotName, cleanTitle);
-          if (searchRes.found && (searchRes.messageId || searchRes.hasDirectMedia)) {
-            foundResult = searchRes;
-            break; // Stop at first successful bot!
-          }
-        } catch (botErr: any) {
-          console.warn(`[CrawlerFlow] Bot ${usedBotName} search attempt failed:`, botErr?.message);
-        }
-        // Small pacing between fallback bot attempts
-        await new Promise(r => setTimeout(r, 1200));
-      }
-
-      if (!foundResult) {
-        await db.execute({
-          sql: "UPDATE requests SET status = 'pending' WHERE id = ?",
-          args: [reqId]
-        });
-
-        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.notAvailable(cleanTitle), {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🍿 Browse catalog", "browse_library")],
-            [Markup.button.callback("🔎 Search another title", "search_prompt")]
-          ])
-        });
-        return;
-      }
-
-      // If search bot returned download/quality options (e.g. 1080p, 720p, 480p, 4K)
-      const downloadBtns = (foundResult.buttons || []).filter((b: any) => 
-        !isBackOrNavButton(b.text) && (b.isDownload || b.text.match(/\b(1080p|720p|480p|4K|2160p|GB|MB|Download|Get)\b/i))
+      const parsed = parseMediaTitleAndSeriesInfo(cleanTitle);
+      const { id: jobId, job: first } = await requestAndWait(
+        { kind: "movie", title: parsed.cleanTitle || cleanTitle, year: parsed.year || null, priority: PRIORITY.user, source: "user", requestedBy: userId },
+        120_000
       );
+      let job = first;
+      if (!job) {
+        // Still working. Park the request so the finish notification reaches this user, then look once more in case it just finished.
+        await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] });
+        const { getJob } = await import("../crawler/service.js");
+        const again = await getJob(jobId);
+        if (again && again.status === "done") { job = again; }
+      }
 
-      if (downloadBtns.length > 1 && foundResult.messageId) {
-        const respKey = saveBotResponse({
-          botUsername: usedBotName,
-          messageId: foundResult.messageId,
-          buttons: foundResult.buttons || [],
-          query: cleanTitle
-        });
-
-        const keyboardRows: any[] = [];
-        for (const btn of downloadBtns.slice(0, 6)) {
-          const polishedLabel = cleanReleaseButtonLabel(btn.text);
-          keyboardRows.push([
-            Markup.button.callback(polishedLabel, `botfwd_${respKey}_${btn.row}_${btn.col}_${reqId}`)
-          ]);
-        }
-        keyboardRows.push([Markup.button.callback("❌ Cancel", "noop")]);
-
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          M.chooseVersion(cleanTitle),
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard(keyboardRows)
-          }
-        );
+      const fileId = job?.status === "done" ? mediaIdOf(job) : undefined;
+      if (fileId) {
+        await markRequestsFulfilled([reqId]);
+        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
+        await deliverMediaFile(ctx, fileId);
         return;
       }
 
-      // If single release or direct media
-      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.found(cleanTitle), { parse_mode: "HTML" }).catch(() => {});
-
-      try {
-        const bestBtn = selectBestMatchingButton(foundResult.buttons, cleanTitle);
-        if (!bestBtn && !(foundResult as any).hasDirectMedia) {
-          throw new Error("No result confidently matched the requested title.");
-        }
-        const fwdRes = await fetchAndForwardBotMedia({
-          botUsername: usedBotName,
-          messageId: foundResult.messageId || 0,
-          buttonRow: bestBtn?.row,
-          buttonCol: bestBtn?.col,
-          userTelegramId: ctx.from.id,
-          expect: { title: cleanTitle }
-        });
-        if (!fwdRes.success) throw new Error(fwdRes.message);
-
-        await markRequestsFulfilled([reqId]);
-
-        if (fwdRes.mediaFileId) {
-          await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-          await deliverMediaFile(ctx, fwdRes.mediaFileId);
-        } else {
-          await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMsg.message_id,
-            undefined,
-            M.readyToWatch(cleanTitle),
-            {
-              parse_mode: "HTML",
-              ...Markup.inlineKeyboard([
-                [Markup.button.callback("▶️ Watch Now", "browse_library")]
-              ])
-            }
-          );
-        }
-      } catch (fwdErr: any) {
-        console.warn("Peer media fetch delay/error:", fwdErr?.message);
-        await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] });
-        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.takingLonger(cleanTitle), {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔄 Try again", `req_q_${getQueryKey(cleanTitle)}`)],
-            [Markup.button.callback("🍿 Browse catalog", "browse_library")]
-          ])
-        });
-      }
+      await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] });
+      const missing = job && (job.status === "not_found" || job.status === "needs_admin");
+      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, missing ? M.notAvailable(cleanTitle) : M.takingLonger(cleanTitle), {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(missing
+          ? [[Markup.button.callback("🍿 Browse catalog", "browse_library")], [Markup.button.callback("🔎 Search another title", "search_prompt")]]
+          : [[Markup.button.callback("🔄 Check again", `req_q_${getQueryKey(cleanTitle)}`)], [Markup.button.callback("🍿 Browse catalog", "browse_library")]])
+      });
     } catch (err: any) {
-      console.error("Autonomous request error:", err);
+      console.error("Request error:", err);
       await db.execute({ sql: "UPDATE requests SET status = 'pending' WHERE id = ?", args: [reqId] }).catch(() => {});
-      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.notAvailable(cleanTitle), {
+      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.takingLonger(cleanTitle), {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([[Markup.button.callback("🍿 Browse catalog", "browse_library")]])
       }).catch(() => {});
@@ -1819,64 +1699,9 @@ function cleanReleaseButtonLabel(rawText: string): string {
     await triggerAutonomousCrawlerFlow(ctx, query);
   });
 
-  // Handle quality button choice from search bot results
-  bot.action(/^botfwd_(.+)_(\d+)_(\d+)_(\d+)$/, async (ctx) => {
-    await ensureUser(ctx);
-    const respKey = ctx.match[1];
-    const row = parseInt(ctx.match[2], 10);
-    const col = parseInt(ctx.match[3], 10);
-    const reqId = parseInt(ctx.match[4], 10);
-
-    const cached = await loadBotResponse(respKey);
-    if (!cached) {
-      return ctx.answerCbQuery(M.selectionExpired());
-    }
-
-    await ctx.answerCbQuery().catch(() => {});
-    await ctx.editMessageText(M.found(cached.query), { parse_mode: "HTML" });
-
-    try {
-      const fwdRes = await fetchAndForwardBotMedia({
-        botUsername: cached.botUsername,
-        messageId: cached.messageId,
-        buttonRow: row,
-        buttonCol: col,
-        userTelegramId: ctx.from.id,
-        expect: { title: cached.query }
-      });
-      if (!fwdRes.success) throw new Error(fwdRes.message);
-
-      await markRequestsFulfilled([reqId]);
-
-      if (fwdRes.mediaFileId) {
-        await ctx.deleteMessage().catch(() => {});
-        await deliverMediaFile(ctx, fwdRes.mediaFileId);
-      } else {
-        await ctx.editMessageText(
-          `🎬 <b>Ready to Watch!</b>\n\n<b>${escapeHtml(fwdRes.fileName || cached.query)}</b> (${fwdRes.fileSizeBytes ? formatFileSize(fwdRes.fileSizeBytes) : "HD"})\n\nTap below to start streaming:`,
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("▶️ Watch Now", "browse_library")]
-            ])
-          }
-        );
-      }
-    } catch (err: any) {
-      console.error("Error in botfwd callback:", err);
-      await ctx.editMessageText(
-        `🎬 <b>Acquisition Processing</b>\n\n` +
-        `We encountered a temporary network delay retrieving <b>${escapeHtml(cached.query)}</b>.\n\n` +
-        `Your request is queued. We will notify you directly as soon as delivery completes!`,
-        {
-          parse_mode: "HTML",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔄 Re-try Acquisition", `botfwd_${respKey}_${row}_${col}_${reqId}`)],
-            [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
-          ])
-        }
-      );
-    }
+  // Old "pick a version" buttons from earlier releases: the crawler now picks the best version itself.
+  bot.action(/^botfwd_/, async (ctx) => {
+    await ctx.answerCbQuery(M.selectionExpired()).catch(() => {});
   });
 
   // Level 2: Series Season Selector (Direct Quinson UX with Merged Catalog)
@@ -1897,7 +1722,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
       qSeasons = cachedSeasons.seasons;
     } else {
       try {
-        qSeasons = await getQuinsonSeriesSeasons(seriesTitle);
+        qSeasons = await listSeasons(seriesTitle);
         if (qSeasons.length > 0) {
           seriesSeasonsCache.set(cacheKey, { seasons: qSeasons, timestamp: Date.now() });
         }
@@ -1982,7 +1807,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
       quinsonEpisodes = cachedEps.episodes;
     } else {
       try {
-        quinsonEpisodes = await getQuinsonSeasonEpisodes(seriesTitle, seasonNum);
+        quinsonEpisodes = await listEpisodesLabeled(seriesTitle, seasonNum);
         if (quinsonEpisodes.length > 0) {
           seriesEpisodesCache.set(epCacheKey, { episodes: quinsonEpisodes, timestamp: Date.now() });
         }
@@ -2088,15 +1913,14 @@ function cleanReleaseButtonLabel(rawText: string): string {
     await ctx.editMessageText(M.episodeGetting(seriesTitle, seasonNum, epNum), { parse_mode: "HTML" });
 
     try {
-      const quinsonRes = await fetchSeriesFromQuinson({
-        seriesTitle,
-        seasonNum,
-        episodeNum: epNum
-      });
+      const { job } = await requestAndWait({ kind: "episode", title: seriesTitle, season: seasonNum, episode: epNum, priority: PRIORITY.user, source: "user", requestedBy: String(ctx.from?.id || "") }, 120_000);
+      const fileId = job?.status === "done" ? mediaIdOf(job) : undefined;
+      if (job && !fileId && job.status === "failed") throw new Error("delayed");
+      if (!job) throw new Error("delayed");
 
-      if (quinsonRes.success && quinsonRes.firstMediaFileId) {
+      if (fileId) {
         await ctx.deleteMessage().catch(() => {});
-        await deliverMediaFile(ctx, quinsonRes.firstMediaFileId);
+        await deliverMediaFile(ctx, fileId);
       } else {
         await ctx.editMessageText(M.episodeNotAvailable(seriesTitle, seasonNum, epNum), {
           parse_mode: "HTML",
@@ -2129,52 +1953,42 @@ function cleanReleaseButtonLabel(rawText: string): string {
     const statusMsg = await ctx.reply(M.seasonStarting(seriesTitle, seasonNum), { parse_mode: "HTML" });
 
     try {
-      const res = await fetchSeriesFromQuinson({
-        seriesTitle,
-        seasonNum,
-        allEpisodes: true,
-        onProgress: async (count) => {
-          await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seasonProgress(seriesTitle, seasonNum, count), { parse_mode: "HTML" }).catch(() => {});
-        }
-      });
+      // Which episodes does the series bot offer, and which do we already hold?
+      const offered = await listEpisodes(seriesTitle, seasonNum);
+      const have = new Set((await getSeriesSeasonEpisodes(seriesTitle, seasonNum)).map((f) => Number(f.episode)));
+      const missing = offered.filter((n) => !have.has(n));
 
-      if (res.success && res.filesIngested > 0) {
-        const finishButtons: any[] = [];
-        if (res.firstMediaFileId) {
-          finishButtons.push([
-            Markup.button.callback("🍿 Stream Episode 1 Now", `watch_${res.firstMediaFileId}`)
-          ]);
-        }
-        finishButtons.push([
-          Markup.button.callback(`▶️ Browse Season ${seasonNum} Episodes (${res.filesIngested} ready)`, `eps_${showKey}_${seasonNum}_1`)
-        ]);
-        finishButtons.push([
-          Markup.button.callback("🍿 Browse Catalog", "browse_library")
-        ]);
+      if (missing.length > 0) {
+        const { id: jobId } = await submitJob({ kind: "season", title: seriesTitle, season: seasonNum, priority: PRIORITY.user, source: "user", requestedBy: String(ctx.from?.id || "") });
+        seasonProgress.set(jobId, async (count: number) => {
+          await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seasonProgress(seriesTitle, seasonNum, have.size + count), { parse_mode: "HTML" }).catch(() => {});
+        });
+        try { await waitForJob(jobId, 20 * 60_000); } finally { seasonProgress.delete(jobId); }
+      }
 
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          M.seasonDone(seriesTitle, seasonNum, res.filesIngested),
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard(finishButtons)
-          }
-        );
+      // Deliver the whole season in episode order, paced so Telegram never throttles us.
+      const rows = (await getSeriesSeasonEpisodes(seriesTitle, seasonNum)).filter((f) => f.episode);
+      const byEp = new Map<number, MediaFileRecord>();
+      for (const f of rows) if (!byEp.has(Number(f.episode))) byEp.set(Number(f.episode), f);
+      const ordered = Array.from(byEp.values()).sort((a, b) => Number(a.episode) - Number(b.episode));
+
+      if (ordered.length > 0) {
+        for (const f of ordered) {
+          await deliverMediaFile(ctx, Number(f.id)).catch(() => {});
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seasonDone(seriesTitle, seasonNum, ordered.length), {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback(`▶️ Browse Season ${seasonNum}`, `eps_${showKey}_${seasonNum}_1`)],
+            [Markup.button.callback("🍿 Browse Catalog", "browse_library")]
+          ])
+        }).catch(() => {});
       } else {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          undefined,
-          M.seasonNone(seriesTitle, seasonNum),
-          {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("◀️ View Episodes", `eps_${showKey}_${seasonNum}_1`)]
-            ])
-          }
-        );
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, M.seasonNone(seriesTitle, seasonNum), {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([[Markup.button.callback("◀️ View Episodes", `eps_${showKey}_${seasonNum}_1`)]])
+        }).catch(() => {});
       }
     } catch (err: any) {
       console.error("Error in qall callback:", err);
@@ -2231,7 +2045,7 @@ function cleanReleaseButtonLabel(rawText: string): string {
           qSeasons = cachedSeasons.seasons;
         } else {
           try {
-            qSeasons = await getQuinsonSeriesSeasons(title);
+            qSeasons = await listSeasons(title);
             if (qSeasons.length > 0) {
               seriesSeasonsCache.set(cacheKey, { seasons: qSeasons, timestamp: Date.now() });
             }

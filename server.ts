@@ -1,5 +1,7 @@
 import express from "express";
 import path from "path";
+import { fetchNow, submitJob, startCrawlWorker, PRIORITY } from "./src/crawler/service.js";
+import { getTraces, listJobs, getJob } from "./src/crawler/jobs.js";
 import { createServer as createViteServer } from "vite";
 import {
   setupDatabase,
@@ -90,8 +92,6 @@ import {
   deleteSearchBot,
   testQuerySearchBot,
   getCrawlerLogs,
-  getSearchJobs,
-  dispatchAutomatedSearch,
   requestAuxiliaryLoginCode,
   verifyAuxiliaryLoginCode,
   disconnectAuxiliarySession,
@@ -161,30 +161,9 @@ async function startServer() {
   app.use("/api/search-test", searchLimiter.middleware());
   app.use("/api/trailer", searchLimiter.middleware());
 
-  const autoFetchQueue: Array<{ title: string; userId: string }> = [];
-  let autoFetchRunning = false;
+  // Public visitors never trigger a crawl inline: the title joins the single durable queue.
   const enqueueAutoFetch = (title: string, userId: string) => {
-    if (autoFetchQueue.some((j) => j.title.toLowerCase() === title.toLowerCase())) return;
-    if (autoFetchQueue.length >= 25) return;
-    autoFetchQueue.push({ title, userId });
-    void runAutoFetchQueue();
-  };
-  const runAutoFetchQueue = async () => {
-    if (autoFetchRunning) return;
-    autoFetchRunning = true;
-    try {
-      while (autoFetchQueue.length > 0) {
-        const job = autoFetchQueue.shift()!;
-        try {
-          await dispatchAutomatedSearch(job.title, job.userId, bot);
-        } catch (e: any) {
-          console.warn("[AutoFetchQueue] job failed:", e?.message || e);
-        }
-        await new Promise((r) => setTimeout(r, 3000));
-      }
-    } finally {
-      autoFetchRunning = false;
-    }
+    void submitJob({ kind: "movie", title, priority: PRIORITY.user, source: "web", requestedBy: userId }).catch((e) => console.warn("[AutoFetch] enqueue failed:", e?.message));
   };
 
   // Database initialization state
@@ -194,6 +173,7 @@ async function startServer() {
       dbReady = true;
       console.log("Database initialized.");
       await initCrawlerService();
+      await startCrawlWorker();
     })
     .catch((err) => {
       console.error("Database setup error:", err);
@@ -776,7 +756,7 @@ async function startServer() {
       let fetchResult: any = null;
       if (auto_fetch !== false) {
         if (isAdminRequest(req)) {
-          fetchResult = await dispatchAutomatedSearch(cleanTitle, userId, bot);
+          fetchResult = await fetchNow(cleanTitle, userId);
         } else {
           // Public visitors never trigger a crawl inline: queue it (one at a time)
           enqueueAutoFetch(cleanTitle, userId);
@@ -810,7 +790,7 @@ async function startServer() {
         return res.status(404).json({ error: "Request not found" });
       }
 
-      const result = await dispatchAutomatedSearch(reqRecord.title, reqRecord.telegram_id, bot);
+      const result = await fetchNow(reqRecord.title, reqRecord.telegram_id);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1061,15 +1041,6 @@ async function startServer() {
     }
   });
 
-  app.get("/api/crawler/jobs", async (req, res) => {
-    try {
-      const jobs = await getSearchJobs();
-      res.json(jobs);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // ================= BATCH CRON CSV / PDF / MD INDEXER ROUTES =================
   app.post("/api/crawler/cron/upload-csv", async (req, res) => {
     try {
@@ -1177,11 +1148,41 @@ async function startServer() {
       if (!query) {
         return res.status(400).json({ error: "query is required" });
       }
-      const result = await dispatchAutomatedSearch(query, telegram_id, bot);
+      const result = await fetchNow(query, telegram_id);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Crawl jobs + the step-by-step trace of what each external bot showed and what we pressed
+  app.get("/api/crawler/jobs", async (req, res) => {
+    try {
+      const rows = await listJobs(Math.min(200, Number(req.query.limit) || 50), (req.query.status as any) || undefined);
+      // Shape kept compatible with the dashboard's job list (query / bot_used / fulfilled …) plus the new fields
+      res.json(rows.map((j) => {
+        let r: any = {};
+        try { r = JSON.parse(j.result_json || "{}"); } catch { /* ignore */ }
+        return {
+          ...j,
+          query: j.title,
+          user_telegram_id: j.requested_by,
+          bot_used: r.bot,
+          file_name: r.fileName,
+          fulfilled_at: j.finished_at,
+          status: j.status === "done" ? "fulfilled" : j.status === "queued" ? "pending" : j.status === "running" ? "searching" : "failed",
+          crawl_status: j.status,
+        };
+      }));
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+  app.get("/api/crawler/jobs/:id", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const job = await getJob(id);
+      if (!job) return res.status(404).json({ error: "Job not found" });
+      res.json({ job, traces: await getTraces(id) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // Phase 4: AI Recommendations

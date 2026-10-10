@@ -149,3 +149,22 @@ test("season: wrong-season files and duplicates are not stored; idle ends the wa
   assert.equal(r.rejected.length, 1);
   assert.equal(r.reason, "idle");
 });
+
+// ── browsing (season/episode lists) ─────────────────────────────────────────
+test("browse: reads seasons and episodes from the bot and caches them", async () => {
+  const B = await import("../src/crawler/browse.js");
+  await B.ensureBlueprintTable();
+  const mk = () =>
+    new FakeBot(
+      {
+        list: { text: "Series", buttons: [[["Severance", "sv_1"]]], go: { Severance: "seasons" } },
+        seasons: { text: "Seasons", buttons: [[["Season 1", "se_1_1"], ["Season 2", "se_1_2"]], ["🔙 Back"]] as any, go: { "Season 2": "eps" } },
+        eps: { text: "Episodes", buttons: [[["E01", "epsel_1_2_1"], ["E02", "epsel_1_2_2"], ["E03", "epsel_1_2_3"]]] as any },
+      },
+      "list"
+    );
+  assert.deepEqual(await B.browseSeasons(mk(), "Severance", "Severance"), [1, 2]);
+  assert.deepEqual(await B.browseEpisodes(mk(), "Severance", 2, "Severance"), [1, 2, 3]);
+  assert.deepEqual(await B.cachedEpisodes("Severance", 2), [1, 2, 3]);
+  assert.equal(await B.cachedEpisodes("Severance", 9), null);
+});

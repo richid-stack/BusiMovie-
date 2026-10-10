@@ -96,7 +96,7 @@ export async function runJob(job: CrawlJob, deps: EngineDeps): Promise<JobOutcom
         }
 
         if (nav.status === "delivering") {
-          const expected = await deps.expectedEpisodes?.(job);
+          const expected = nav.expected ?? (await deps.expectedEpisodes?.(job));
           const got: EpisodeResult[] = [];
           const res = await collectSeason(
             session.transport,

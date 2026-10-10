@@ -8,7 +8,7 @@
  *  - Transport (Telegram) is an interface, so the whole engine is testable with scripted bots.
  */
 import { Button, Screen } from "./screen.js";
-import { classifyScreen, ScreenKind, episodeNumberOf, seasonNumberOf } from "./classify.js";
+import { classifyScreen, ScreenKind, episodeNumberOf, seasonNumberOf, isEpisodeButton } from "./classify.js";
 import { isBackOrNavButton, selectBestMatchingButton } from "./buttons.js";
 import { verifyDownloadedFile } from "./verify.js";
 
@@ -29,7 +29,7 @@ export interface Transport {
 }
 
 export interface Goal {
-  kind: "movie" | "episode" | "season";
+  kind: "movie" | "episode" | "season" | "seasons" | "episodes";
   title: string;
   year?: string;
   season?: number;
@@ -59,7 +59,8 @@ export interface TraceStep {
 
 export type NavOutcome =
   | { status: "media"; media: Screen; verified: boolean; trace: TraceStep[] }
-  | { status: "delivering"; screen: Screen; trace: TraceStep[] } // "send all" pressed; caller collects the files
+  | { status: "delivering"; screen: Screen; expected?: number; trace: TraceStep[] } // "send all" pressed; caller collects the files
+  | { status: "reached"; screen: Screen; trace: TraceStep[] } // browse goals: arrived at the season/episode list
   | { status: "not_found"; reason: string; trace: TraceStep[] }
   | { status: "wrong_file"; reason: string; media: Screen; trace: TraceStep[] }
   | { status: "blocked"; reason: "rate_limit" | "gate"; waitSec?: number; detail?: string; trace: TraceStep[] }
@@ -215,6 +216,7 @@ export async function navigate(t: Transport, goal: Goal, opts: NavOptions): Prom
       }
 
       case "SEASONS": {
+        if (goal.kind === "seasons") { log(cls.kind, "browse: season list reached", "stop (reached)", cur); return { status: "reached", screen: cur, trace }; }
         if (goal.season === undefined) return fail("reached a season list but no season was requested");
         const b = cur.buttons.find((x) => seasonNumberOf(x) === goal.season);
         if (!b) {
@@ -228,12 +230,14 @@ export async function navigate(t: Transport, goal: Goal, opts: NavOptions): Prom
       }
 
       case "EPISODES": {
+        if (goal.kind === "episodes") { log(cls.kind, "browse: episode list reached", "stop (reached)", cur); return { status: "reached", screen: cur, trace }; }
         if (goal.kind === "season") {
           const all = findSendAll(cur.buttons);
           if (all) {
             log(cls.kind, "season requested", `click "${all.text}" (send all)`, cur);
             await t.click(cur, all);
-            return { status: "delivering", screen: cur, trace };
+            const hasMore = Boolean(findNextPage(cur.buttons));
+            return { status: "delivering", screen: cur, expected: hasMore ? undefined : cur.buttons.filter(isEpisodeButton).length || undefined, trace };
           }
           log(cls.kind, "no send-all button", "stop", cur);
           return notFound("the bot has no whole-season option");
