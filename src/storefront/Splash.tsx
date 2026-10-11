@@ -16,7 +16,7 @@ export default function Splash({ onDone }: { onDone: () => void }) {
       <GrainGradient className="h-full w-full" grainSize={3}>
         <div className="flex h-full w-full items-center justify-center">
           <div className="bm-rise">
-            <Wordmark size={46} />
+            <Wordmark size={84} mono className="text-white" />
           </div>
         </div>
       </GrainGradient>

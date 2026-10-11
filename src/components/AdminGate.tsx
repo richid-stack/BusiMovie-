@@ -115,7 +115,7 @@ export default function AdminGate({ children }: { children: React.ReactNode }) {
     <GrainGradient className="min-h-screen" seed={11}>
       <div className="flex min-h-screen flex-col items-center justify-center px-5 py-10">
         <div className="bm-rise mb-8">
-          <Wordmark size={34} />
+          <Wordmark size={40} mono className="text-white" />
         </div>
         <form
           onSubmit={submit}

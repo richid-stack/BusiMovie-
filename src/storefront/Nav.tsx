@@ -24,7 +24,7 @@ export function TopNav({ tab, setTab, onSearch }: { tab: Tab; setTab: (t: Tab) =
       <div className="mx-auto flex h-16 max-w-[1800px] items-center justify-between px-4 md:px-12">
         <div className="flex items-center gap-10">
           <button onClick={() => setTab("home")} aria-label="BusiMovie home" className="focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 rounded">
-            <Wordmark size={22} />
+            <Wordmark size={24} mono className="text-white" />
           </button>
           <nav className="hidden items-center gap-7 md:flex" aria-label="Browse">
             {TABS.map(t => (
