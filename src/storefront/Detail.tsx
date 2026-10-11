@@ -22,6 +22,11 @@ export default function Detail({ item, saved, onClose, onPlay, onToggleList }: {
   }, [onClose]);
 
   useEffect(() => {
+    if (isDemo()) return;
+    fetch("/api/library/view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: item.movie_title }) }).catch(() => {});
+  }, [item.movie_title]);
+
+  useEffect(() => {
     if (!item.is_series || episodes.length || isDemo()) return;
     fetch(`/api/series/${encodeURIComponent(item.movie_title)}/episodes`).then(r => r.ok ? r.json() : []).then(setEpisodes).catch(() => {});
   }, [item, episodes.length]);

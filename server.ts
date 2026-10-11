@@ -39,6 +39,7 @@ import {
   setBotWebhook,
   deleteBotWebhook
 } from "./src/bot/index.js";
+import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
 import {
   registerAuthRoutes,
@@ -158,6 +159,8 @@ async function startServer() {
   // Public requests are limited per IP, and never crawl inline (they go through a single sequential queue)
   const requestLimiter = createRateLimiter({ windowMs: 24 * 60 * 60 * 1000, max: 5, keyPrefix: "request" });
   const searchLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 40, keyPrefix: "search" });
+  const viewLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 60, keyPrefix: "view" });
+  const seenViews = new Map<string, number>(); // ip+title -> last counted (ms): one view per viewer per title per 30 min
   app.use("/api/search-test", searchLimiter.middleware());
   app.use("/api/trailer", searchLimiter.middleware());
 
@@ -174,6 +177,7 @@ async function startServer() {
       console.log("Database initialized.");
       await initCrawlerService();
       await startCrawlWorker();
+      purgeOldViews().catch(() => {});
     })
     .catch((err) => {
       console.error("Database setup error:", err);
@@ -440,6 +444,10 @@ async function startServer() {
 
       // Grouped view: TV series grouped as 1 entry per show with seasons & episodes, Movies with qualities
       const files = await getVaultCatalogGrouped(q);
+      try {
+        const views = await recentViews(7);
+        for (const f of files as any[]) f.views = views.get(viewKey(f.movie_title || "")) || 0;
+      } catch { /* views are cosmetic */ }
 
       // Auto-populate poster_url for items missing posters in background without blocking response
       setTimeout(async () => {
@@ -464,6 +472,22 @@ async function startServer() {
       res.json({ count: files.length, files: isAdminRequest(req) ? files : stripInternal(files) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Anonymous "someone opened this title" ping from the storefront; feeds Top 10 this week
+  app.post("/api/library/view", async (req, res) => {
+    try {
+      if (!viewLimiter.hit(clientIp(req)).allowed) return res.status(429).json({ ok: false });
+      const title = String(req.body?.title || "");
+      const k = `${clientIp(req)}|${viewKey(title)}`;
+      const last = seenViews.get(k) || 0;
+      if (Date.now() - last < 30 * 60 * 1000) return res.json({ ok: true, counted: false });
+      if (seenViews.size > 5000) seenViews.clear();
+      seenViews.set(k, Date.now());
+      res.json({ ok: true, counted: await recordView(title) });
+    } catch (err: any) {
+      res.status(500).json({ ok: false });
     }
   });
 

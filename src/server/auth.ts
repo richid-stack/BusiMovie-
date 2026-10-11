@@ -264,7 +264,8 @@ const PUBLIC_ROUTES: Array<{ method: string; pattern: RegExp }> = [
   { method: "GET", pattern: /^\/api\/trailer$/ },
   { method: "GET", pattern: /^\/api\/search-test$/ },
   { method: "GET", pattern: /^\/api\/media\/\d+\/stream$/ }, // returns a Telegram deep link only (no token)
-  { method: "POST", pattern: /^\/api\/requests\/create$/ }
+  { method: "POST", pattern: /^\/api\/requests\/create$/ },
+  { method: "POST", pattern: /^\/api\/library\/view$/ } // anonymous view counter for "Top 10"
 ];
 
 export function isPublicRoute(method: string, path: string): boolean {
