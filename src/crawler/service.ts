@@ -22,13 +22,18 @@ const handleOf = (h: string) => (h.startsWith("@") ? h : `@${h}`);
 
 export async function loadBots(): Promise<BotProfile[]> {
   const rows = (await db.execute("SELECT * FROM search_bots WHERE status = 'active' ORDER BY priority ASC, id ASC")).rows as any[];
-  return rows.map((r) => {
+  const list = rows.map((r) => {
     let profile: any = {};
     try { profile = r.profile ? JSON.parse(r.profile) : {}; } catch { /* bad JSON → defaults */ }
     const handle = handleOf(String(r.bot_username));
     const scope: BotProfile["scope"] = profile.scope || (/quinson/i.test(handle) ? "series" : "movie");
     return { handle, scope, commandTemplate: String(r.command_template || "{query}") };
   });
+  // Series have always been served by @quinsonnbot even when it is not listed as a search bot; keep that working.
+  if (!list.some((b) => b.scope === "series" || b.scope === "both")) {
+    list.push({ handle: "@quinsonnbot", scope: "series", commandTemplate: "{query}" });
+  }
+  return list;
 }
 
 async function openSession(handle: string) {

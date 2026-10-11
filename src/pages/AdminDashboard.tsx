@@ -9,6 +9,7 @@ import {
   UploadCloud, RotateCw, Sliders, ListFilter, Edit2, Save, X,
   Tv, Film
 } from "lucide-react";
+import CrawlJobs from "./admin/CrawlJobs";
 import { 
   Status, 
   MediaFile, 
@@ -43,7 +44,7 @@ export default function AdminDashboard() {
   const [showAddForm, setShowAddForm] = useState(false);
   
   // Tabs
-  const [activeTab, setActiveTab] = useState<"overview" | "automation" | "requests" | "library" | "comms">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "automation" | "jobs" | "requests" | "library" | "comms">("overview");
 
   // Requests Data
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
@@ -1076,6 +1077,7 @@ export default function AdminDashboard() {
           {[
             { id: "overview", label: "Overview", icon: Database },
             { id: "automation", label: "Crawlers & Bots", icon: Bot },
+            { id: "jobs", label: "Crawl Jobs", icon: ListFilter },
             { id: "requests", label: "User Requests", icon: Bell },
             { id: "library", label: "Vault Inventory", icon: HardDrive },
             { id: "comms", label: "Engagement", icon: Megaphone }
@@ -1098,6 +1100,8 @@ export default function AdminDashboard() {
             );
           })}
         </div>
+
+        {activeTab === "jobs" && <CrawlJobs />}
 
         {/* ================= OVERVIEW TAB ================= */}
         {activeTab === "overview" && (

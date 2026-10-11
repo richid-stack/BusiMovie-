@@ -1176,6 +1176,14 @@ async function startServer() {
       }));
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
+  app.post("/api/crawler/jobs/:id/retry", async (req, res) => {
+    try {
+      const j = await getJob(Number(req.params.id));
+      if (!j) return res.status(404).json({ error: "Job not found" });
+      const r = await submitJob({ kind: j.kind, title: j.title, year: j.year, season: j.season, episode: j.episode, quality: j.quality, priority: PRIORITY.admin, source: "admin", requestedBy: j.requested_by });
+      res.json({ success: true, id: r.id, existing: r.existing });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
   app.get("/api/crawler/jobs/:id", async (req, res) => {
     try {
       const id = Number(req.params.id);
