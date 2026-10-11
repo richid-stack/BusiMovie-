@@ -1,7 +1,7 @@
 # BusiMovie — progress & handoff
 
 Branch: `claude/audit-fixes` (GitHub `richid-stack/BusiMovie-`). Plan: `implementation_plan.md` in the Claude project ("busimovie").
-Run: `npm i && npm run dev` · Tests: `npm test` (73 passing) · Typecheck: `npx tsc --noEmit` (clean).
+Run: `npm i && npm run dev` · Tests: `npm test` (75 passing) · Typecheck: `npx tsc --noEmit` (clean).
 Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to skip the splash).
 
 ## Done
@@ -41,17 +41,21 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 - Tested with scripted fake bots (Delta-like, Apple-like, Quinson-like, gates, empty, throttled, loops, wrong file, pagination). **Not yet verified against the real external bots** — first live run needs the Telegram session; check the trace of the first few jobs.
 - Not built (by choice, small value for now): "mirror mode" (re-skinning the external bot's options for the viewer) and persistent learned rules for the AI advisor. The old manual "Search Bot Playground" endpoints still use the legacy helpers.
 
-**Phase 5 (partly) — admin**
-- New **Crawl Jobs** tab (`src/pages/admin/CrawlJobs.tsx`): job list with filters, and a side panel with the step-by-step trace per bot (what the bot showed, what was pressed, why) plus "Try again". The rest of the 3,100-line admin is not yet split or redesigned.
+**Phase 5 — admin console** (rebuilt, `src/admin/`)
+- Old 3,100-line dashboard deleted. New sidebar console at `/admin/*` (mobile: top bar + sheet; `Ctrl/⌘ K` jump palette) with a small shared design system (`src/admin/ui/`: buttons, badges, cards, tables, drawers, confirm dialogs, toasts, empty states, charts) and react-query for data. Ember gradient is used only for the one main action per screen and the active-nav marker; status colours are separate.
+- Pages: **Overview** (needs-attention list, stats, files-added chart, crawler results), **Library** (movies/series grouped, search, expandable episodes, add/remove file, export, re-check series), **Requests** (fetch now / mark ready), **Crawl jobs** (filters + trace drawer + try again), **Search bots** (add/edit/enable, per-bot scope movies/series/both, test drawer with press-a-button), **Source channels** (add from joined channels, watch toggle, backfill, activity), **Batch import** (CSV/TXT/MD/TSV/PDF or paste, scheduler settings, queue, emergency stop), **Connections** (bot webhook/polling, database, userbot sign-in or session string, vault channels), **Messaging** (announcement, spotlight).
+- Every old admin feature is kept; `window.confirm/alert` replaced by in-app dialogs and toasts. Tables hide secondary columns on phones.
+
+**Storefront Top 10** — anonymous per-title weekly view counter (`src/db/views.ts`, `POST /api/library/view`, de-duplicated per viewer per 30 min and rate limited); `/api/library` returns `views`, so "Top 10 this week" appears once titles are opened.
 
 **Phase 6 — hygiene**
 - One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
 - Real app icons (they were mislabelled SVGs), PWA manifest now "BusiMovie" with ink/ember colours, README rewritten, `GEMINI_MODEL` setting (default `gemini-flash-latest`), `.env.example` cleaned (no Radarr/Sonarr).
 
-## Next (see plan §6)
-1. Pick one of the three wordmarks (shared separately) and I apply it to the splash, nav, favicon and PWA icon.
-2. Finish the storefront (view counter for Top 10, real backdrops) and split/redesign the rest of the admin.
-3. First live crawler run: read the traces of the first jobs and tune per-bot behaviour.
+## Next
+1. First live crawler run: read the traces (Admin → Crawl jobs) of the first few jobs and tune per-bot behaviour.
+2. Billboard uses the poster (the zero-key metadata sources give no wide backdrops). A `TMDB_API_KEY` would allow real backdrops.
+3. Optional later: mirror mode, persisted learned advisor rules, move the playground endpoints onto the new engine.
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
