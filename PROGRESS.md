@@ -41,10 +41,17 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 - Tested with scripted fake bots (Delta-like, Apple-like, Quinson-like, gates, empty, throttled, loops, wrong file, pagination). **Not yet verified against the real external bots** — first live run needs the Telegram session; check the trace of the first few jobs.
 - Not built (by choice, small value for now): "mirror mode" (re-skinning the external bot's options for the viewer) and persistent learned rules for the AI advisor. The old manual "Search Bot Playground" endpoints still use the legacy helpers.
 
+**Phase 5 (partly) — admin**
+- New **Crawl Jobs** tab (`src/pages/admin/CrawlJobs.tsx`): job list with filters, and a side panel with the step-by-step trace per bot (what the bot showed, what was pressed, why) plus "Try again". The rest of the 3,100-line admin is not yet split or redesigned.
+
+**Phase 6 — hygiene**
+- One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
+- Real app icons (they were mislabelled SVGs), PWA manifest now "BusiMovie" with ink/ember colours, README rewritten, `GEMINI_MODEL` setting (default `gemini-flash-latest`), `.env.example` cleaned (no Radarr/Sonarr).
+
 ## Next (see plan §6)
-1. **Phase 4–5** — finish storefront (views counter for Top 10, real backdrops) and redesign the admin (3157-line AdminDashboard), including a crawl-jobs / trace viewer screen (API already exists).
-2. **Phase 6** — single lockfile, PWA name/icons (still "Telegram Movie Vault"), README, `GEMINI_MODEL` env.
-3. Three original wordmark options for Richie to pick from (current one is a placeholder).
+1. Pick one of the three wordmarks (shared separately) and I apply it to the splash, nav, favicon and PWA icon.
+2. Finish the storefront (view counter for Top 10, real backdrops) and split/redesign the rest of the admin.
+3. First live crawler run: read the traces of the first jobs and tune per-bot behaviour.
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
