@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import GrainGradient from "./GrainGradient";
 import Wordmark from "./Wordmark";
-import { checkSession, loginWithPassword, loginWithTelegram, loginWithWebApp, logout } from "../lib/adminAuth";
+import { checkSession, loginWithPassword, loginWithTelegram, loginWithWebApp } from "../lib/adminAuth";
 
 interface AuthConfig {
   telegramEnabled: boolean;
@@ -100,12 +100,6 @@ export default function AdminGate({ children }: { children: React.ReactNode }) {
   if (state === "ok") {
     return (
       <>
-        <button
-          onClick={() => logout()}
-          className="fixed left-4 bottom-4 z-[9999] rounded-full border border-line bg-surface-1/80 px-3 py-1.5 text-xs font-medium text-zinc-400 backdrop-blur transition hover:text-white"
-        >
-          Sign out
-        </button>
         {children}
       </>
     );

@@ -106,3 +106,14 @@
     animation: none !important;
   }
 }
+
+/* ---------------- admin console motion ---------------- */
+@keyframes adm-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes adm-slide { from { transform: translateX(24px); opacity: 0 } to { transform: none; opacity: 1 } }
+@keyframes adm-pop { from { transform: translateY(8px) scale(.98); opacity: 0 } to { transform: none; opacity: 1 } }
+.adm-fade { animation: adm-fade .18s ease-out both }
+.adm-slide { animation: adm-slide .26s var(--ease-spring) both }
+.adm-pop { animation: adm-pop .2s var(--ease-spring) both }
+@media (prefers-reduced-motion: reduce) {
+  .adm-fade, .adm-slide, .adm-pop { animation: none }
+}

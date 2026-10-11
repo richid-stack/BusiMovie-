@@ -667,14 +667,16 @@ export async function addSearchBot(bot: {
   bot_type?: "inline" | "command";
   command_template?: string;
   priority?: number;
+  scope?: "movie" | "series" | "both";
 }): Promise<SearchBot> {
   const res = await db.execute({
-    sql: "INSERT INTO search_bots (bot_username, bot_type, command_template, status, priority) VALUES (?, ?, ?, 'active', ?)",
+    sql: "INSERT INTO search_bots (bot_username, bot_type, command_template, status, priority, profile) VALUES (?, ?, ?, 'active', ?, ?)",
     args: [
       bot.bot_username.trim(),
       bot.bot_type || "inline",
       bot.command_template || "/search {query}",
-      bot.priority || 1
+      bot.priority || 1,
+      bot.scope ? JSON.stringify({ scope: bot.scope }) : null
     ]
   });
   const newBot = (await db.execute({
@@ -721,6 +723,11 @@ export async function updateSearchBot(id: number, updates: Partial<SearchBot>): 
   if (updates.priority !== undefined) {
     fields.push("priority = ?");
     args.push(updates.priority);
+  }
+
+  if ((updates as any).scope !== undefined) {
+    fields.push("profile = ?");
+    args.push(JSON.stringify({ scope: (updates as any).scope }));
   }
 
   if (fields.length === 0) return false;

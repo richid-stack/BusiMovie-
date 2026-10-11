@@ -948,7 +948,11 @@ async function startServer() {
   app.get("/api/crawler/bots", async (req, res) => {
     try {
       const bots = await getSearchBots();
-      res.json(bots);
+      res.json(bots.map((b: any) => {
+        let scope: string | undefined;
+        try { scope = b.profile ? JSON.parse(b.profile).scope : undefined; } catch { /* ignore */ }
+        return { ...b, scope: scope || (/quinson/i.test(b.bot_username) ? "series" : "movie") };
+      }));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -956,7 +960,7 @@ async function startServer() {
 
   app.post("/api/crawler/bots", async (req, res) => {
     try {
-      const { bot_username, bot_type, command_template, priority } = req.body;
+      const { bot_username, bot_type, command_template, priority, scope } = req.body;
       if (!bot_username) {
         return res.status(400).json({ error: "bot_username is required" });
       }
@@ -964,7 +968,8 @@ async function startServer() {
         bot_username,
         bot_type: bot_type || "inline",
         command_template: command_template || "/search {query}",
-        priority: priority ? parseInt(priority, 10) : 1
+        priority: priority ? parseInt(priority, 10) : 1,
+        scope: ["movie", "series", "both"].includes(scope) ? scope : undefined
       });
       res.json({ success: true, bot: created });
     } catch (err: any) {
