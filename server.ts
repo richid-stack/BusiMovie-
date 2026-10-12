@@ -39,6 +39,7 @@ import {
   setBotWebhook,
   deleteBotWebhook
 } from "./src/bot/index.js";
+import { startChannelWatcher, scheduleReconcile, targetStats, watcherState } from "./src/crawler/channels.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
 import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
@@ -178,6 +179,7 @@ async function startServer() {
       console.log("Database initialized.");
       await initCrawlerService();
       await startCrawlWorker();
+      startChannelWatcher();
       purgeOldViews().catch(() => {});
     })
     .catch((err) => {
@@ -854,6 +856,7 @@ async function startServer() {
         return res.status(400).json({ error: "Verification code is required" });
       }
       const result = await verifyAuxiliaryLoginCode(code, password);
+      scheduleReconcile();
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -878,6 +881,7 @@ async function startServer() {
         return res.status(400).json({ error: "Session string is required" });
       }
       await saveDirectSessionString(session);
+      scheduleReconcile();
       res.json({ success: true, message: "Session string saved successfully!" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -915,7 +919,9 @@ async function startServer() {
   app.get("/api/crawler/targets", async (req, res) => {
     try {
       const targetsList = await getCrawlerTargets();
-      res.json(targetsList);
+      const stats = await targetStats();
+      const live = watcherState();
+      res.json(targetsList.map((t: any) => ({ ...t, ingest: stats[t.id] || { saved: 0, skipped: 0, failed: 0, reasons: [] }, watch: live[t.id] || { live: false } })));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -933,6 +939,7 @@ async function startServer() {
         min_file_size_mb: min_file_size_mb ? parseInt(min_file_size_mb, 10) : 500,
         quality_filter: quality_filter || "all"
       });
+      scheduleReconcile();
       res.json({ success: true, target: created });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -943,6 +950,7 @@ async function startServer() {
     try {
       const id = parseInt(req.params.id, 10);
       const success = await updateCrawlerTarget(id, req.body);
+      scheduleReconcile();
       res.json({ success });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -953,6 +961,7 @@ async function startServer() {
     try {
       const id = parseInt(req.params.id, 10);
       const success = await deleteCrawlerTarget(id);
+      scheduleReconcile();
       res.json({ success });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -962,7 +971,12 @@ async function startServer() {
   app.post("/api/crawler/targets/:id/backfill", async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const limit = parseInt(req.body.limit || "50", 10);
+      const limit = Math.min(1000, Math.max(1, parseInt(req.body.limit || "50", 10)));
+      if (limit > 100) {
+        // long scans run in the background; progress shows in Activity and the channel's counters
+        runChannelBackfill(id, limit).catch((e) => console.warn("[backfill] failed:", e?.message));
+        return res.json({ success: true, background: true, limit });
+      }
       const result = await runChannelBackfill(id, limit);
       res.json({ success: true, ...result });
     } catch (err: any) {

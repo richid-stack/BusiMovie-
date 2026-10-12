@@ -7,6 +7,8 @@ import { Drawer, Modal, useConfirm, useToast } from "../ui/overlay";
 interface Target {
   id: number; channel_identifier: string; title: string; status: "active" | "paused" | "syncing";
   min_file_size_mb: number; quality_filter: string; last_crawled_at: string | null; total_files_found: number;
+  ingest?: { saved: number; skipped: number; failed: number; reasons: Array<{ reason: string; n: number }> };
+  watch?: { live: boolean; error?: string };
 }
 interface LogRow { id: string; timestamp: string; type: string; source: string; title: string; details: string; status: "success" | "filtered" | "cooldown" | "error" }
 interface Dialog { id: string; title: string; username: string | null; isChannel: boolean; isGroup: boolean }
@@ -33,7 +35,7 @@ export default function Sources() {
     <div className="space-y-6">
       <PageHeader
         title="Source channels"
-        description="Telegram channels the userbot watches. New movie and series uploads are copied into your vault automatically."
+        description="Telegram channels the userbot watches live. New uploads are checked and, if they are 1080p or 720p films or episodes you don't already have, copied to your movies or series vault."
         actions={<Button variant="primary" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => setAdding(true)}>Add channel</Button>}
       />
       <Card flush>
@@ -42,14 +44,18 @@ export default function Sources() {
         ) : (
           <Table>
             <THead>
-              <TH>Channel</TH><TH className="hidden md:table-cell">Rules</TH><TH className="hidden md:table-cell">Found</TH><TH className="hidden md:table-cell">Last checked</TH><TH>Watching</TH><TH className="text-right">Actions</TH>
+              <TH>Channel</TH><TH className="hidden md:table-cell">Rules</TH><TH className="hidden md:table-cell">Saved / skipped</TH><TH className="hidden md:table-cell">Last saved</TH><TH>Watching</TH><TH className="text-right">Actions</TH>
             </THead>
             <tbody>
               {rows.map((t) => (
                 <TR key={t.id}>
-                  <TD className="max-w-[7rem] sm:max-w-[14rem]"><div className="truncate font-medium text-white">{t.title}</div><div className="truncate font-mono text-xs text-zinc-500">{t.channel_identifier}</div></TD>
-                  <TD className="hidden md:table-cell whitespace-nowrap text-xs text-zinc-400">{t.quality_filter === "all" ? "Any quality" : t.quality_filter} · ≥ {t.min_file_size_mb} MB</TD>
-                  <TD className="hidden md:table-cell tabular-nums">{t.total_files_found}</TD>
+                  <TD className="max-w-[7rem] sm:max-w-[14rem]"><div className="truncate font-medium text-white">{t.title}</div><div className="truncate font-mono text-xs text-zinc-500">{t.channel_identifier}</div>
+                    <div className="mt-1">{t.status === "paused" ? <Badge tone="neutral">Paused</Badge> : t.watch?.error ? <Badge tone="bad" dot>{t.watch.error}</Badge> : t.watch?.live ? <Badge tone="ok" pulse>Live</Badge> : <Badge tone="warn" dot>Waiting for the userbot</Badge>}</div></TD>
+                  <TD className="hidden md:table-cell whitespace-nowrap text-xs text-zinc-400">{t.quality_filter === "1080p" || t.quality_filter === "720p" ? `${t.quality_filter} only` : "1080p + 720p"} · ≥ {t.min_file_size_mb} MB</TD>
+                  <TD className="hidden md:table-cell tabular-nums" >
+                    <span className="text-zinc-200">{t.ingest?.saved ?? t.total_files_found}</span> <span className="text-zinc-600">/</span> {t.ingest?.skipped ?? 0}
+                    {t.ingest?.reasons?.[0] && <div className="max-w-[12rem] truncate text-xs text-zinc-500" title={t.ingest.reasons.map((r) => `${r.n}× ${r.reason}`).join("\n")}>{t.ingest.reasons[0].n}× {t.ingest.reasons[0].reason}</div>}
+                  </TD>
                   <TD className="hidden md:table-cell whitespace-nowrap text-zinc-500">{timeAgo(t.last_crawled_at)}</TD>
                   <TD><Toggle checked={t.status !== "paused"} onChange={() => toggle.mutate(t, { onError: (e) => toast.err(e.message) })} label={`Watch ${t.title}`} /></TD>
                   <TD>
@@ -90,7 +96,7 @@ export default function Sources() {
 
 function AddTarget({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast();
-  const base = { channel_identifier: "", title: "", min_file_size_mb: 500, quality_filter: "all" };
+  const base = { channel_identifier: "", title: "", min_file_size_mb: 300, quality_filter: "all" };
   const [f, setF] = useState(base);
   const dialogs = useGet<Dialog[]>(["dialogs"], "/api/crawler/joined-dialogs", { enabled: open });
   const add = useAct(() => api("/api/crawler/targets", { body: f }), [["targets"]], () => { toast.ok("Channel added."); setF(base); onClose(); });
@@ -114,10 +120,10 @@ function AddTarget({ open, onClose }: { open: boolean; onClose: () => void }) {
         <div className="grid grid-cols-2 gap-3">
           <Field label="Quality">
             <Select value={f.quality_filter} onChange={(e) => setF({ ...f, quality_filter: e.target.value })}>
-              <option value="all">Any</option><option value="1080p">1080p only</option><option value="4k">4K only</option>
+              <option value="all">1080p + 720p</option><option value="1080p">1080p only</option><option value="720p">720p only</option>
             </Select>
           </Field>
-          <Field label="Smallest file (MB)" hint="Skips trailers and samples."><Input type="number" min={0} value={f.min_file_size_mb} onChange={(e) => setF({ ...f, min_file_size_mb: Number(e.target.value) })} /></Field>
+          <Field label="Smallest file (MB)" hint="Skips samples and clips. Below-720p and 4K files are always skipped."><Input type="number" min={0} value={f.min_file_size_mb} onChange={(e) => setF({ ...f, min_file_size_mb: Number(e.target.value) })} /></Field>
         </div>
       </div>
     </Drawer>
@@ -128,7 +134,7 @@ function BackfillModal({ target, onClose }: { target: Target | null; onClose: ()
   const toast = useToast();
   const [limit, setLimit] = useState(50);
   const run = useAct(() => api<any>(`/api/crawler/targets/${target!.id}/backfill`, { body: { limit } }), [["targets"], ["library-raw"], ["crawler-logs"]], (r) => {
-    toast.ok(`Looked at ${r.scanned ?? 0} posts and saved ${r.ingested ?? 0} new files.`);
+    toast.ok(r.background ? "Scanning in the background. Watch Activity below." : `Looked at ${r.scanned ?? 0} posts and saved ${r.ingested ?? 0} new files.`);
     onClose();
   });
   return (
@@ -136,10 +142,10 @@ function BackfillModal({ target, onClose }: { target: Target | null; onClose: ()
       <Button variant="ghost" onClick={onClose}>Cancel</Button>
       <Button variant="primary" loading={run.isPending} onClick={() => run.mutate(undefined as never, { onError: (e) => toast.err(e.message) })}>Start</Button>
     </>}>
-      <p className="mb-3">Go back through older posts in this channel and save any files that match your rules.</p>
+      <p className="mb-3">Go back through older posts in this channel and save the ones that match your rules. Posts already handled are skipped, so it's safe to run twice.</p>
       <Field label="How many recent posts">
         <Select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
-          {[20, 50, 100].map((n) => <option key={n} value={n}>{n} posts</option>)}
+          {[20, 50, 100, 300, 1000].map((n) => <option key={n} value={n}>{n} posts{n > 100 ? " (runs in the background)" : ""}</option>)}
         </Select>
       </Field>
     </Modal>
