@@ -3,7 +3,7 @@
  * Everything the bot, the server and the cron indexer use to get a file goes through here.
  */
 import { db, addMediaFile, getSeriesSeasonEpisodes } from "../db/index.js";
-import { getConnectedClient, getEffectiveVaultChannelId, logActivity } from "../services/crawlerService.js";
+import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { GramTransport } from "./gramTransport.js";
 import { forwardToVault } from "./vault.js";
@@ -14,7 +14,8 @@ import { normalizeTitleFuzzy } from "./verify.js";
 import { geminiAdvisor } from "./geminiAdvisor.js";
 import { runJob, BotProfile, EngineDeps, JobOutcome, commandFor } from "./engine.js";
 import { browseEpisodes, browseSeasons, cachedEpisodes, cachedSeasons, ensureBlueprintTable } from "./browse.js";
-import { withBotLock } from "./lock.js";
+import { withBotLock, withDeadline, DeadlineError } from "./lock.js";
+import { alertAdmin } from "../services/alerts.js";
 import {
   claimNextJob, enqueueJob, ensureCrawlerTables, finishJob, getJob, jobEvents, waitForJob, CrawlJob, NewJob, PRIORITY,
 } from "./jobs.js";
@@ -63,7 +64,7 @@ async function acquire(media: Screen, job: CrawlJob, botHandle: string, episode?
   if (job.source === "companion" && (qj.quality === "1080p" || qj.quality === "720p") && qj.quality !== job.quality) {
     throw new Error(`the bot sent ${qj.quality} but ${job.quality} was wanted`);
   }
-  const vaultId = await getEffectiveVaultChannelId(isSeries);
+  const vaultId = await requireVaultChannelId(isSeries);
   const vault = await s.client.getEntity(vaultId);
   const copy = await forwardToVault(s.client, s.botEntity, vault, media.msgId, media.media?.size);
 
@@ -114,18 +115,6 @@ const engineDeps: EngineDeps = {
   onProgress: async (job, eps) => { await progressHook?.(job, eps.length); },
 };
 
-async function process1(job: CrawlJob) {
-  let outcome: JobOutcome;
-  try {
-    outcome = await runJob(job, engineDeps);
-  } catch (e: any) {
-    outcome = { status: "failed", error: e?.message || "unexpected error" };
-  }
-  await finishJob(job.id, outcome.status, outcome.result, outcome.error);
-  await queueCompanion(job, outcome).catch((e) => console.warn("[crawler] companion check failed:", e?.message));
-  await Promise.resolve(notifier?.(job, outcome)).catch((e) => console.warn("[crawler] notifier failed:", e?.message));
-}
-
 /** Labels of the copies we hold for a movie (not series), matched by fuzzy title and year. */
 export async function heldQualities(title: string, year?: string | null): Promise<string[]> {
   const rows = (await db.execute("SELECT movie_title, year, quality FROM media_files WHERE season IS NULL")).rows as any[];
@@ -151,6 +140,67 @@ async function queueCompanion(job: CrawlJob, outcome: JobOutcome) {
   await submitJob({ kind: "movie", title: job.title, year: job.year, quality: need, priority: PRIORITY.cron, source: "companion" });
 }
 
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+/** Longest a whole job may take (all bots, all steps). The per-bot limit in engine.ts normally fires first. */
+export const JOB_DEADLINE_MS: Record<string, number> = { movie: 15 * 60_000, episode: 25 * 60_000, season: 45 * 60_000 };
+const deadlineFor = (job: CrawlJob) => JOB_DEADLINE_MS[job.kind] ?? JOB_DEADLINE_MS.movie;
+
+const health = { current: null as null | { id: number; title: string; startedAt: number; deadlineMs: number }, lastBeatAt: Date.now(), lastFinishedAt: 0, failStreak: 0 };
+export function workerHealth() {
+  const now = Date.now();
+  const c = health.current;
+  return {
+    running: running && !stopped,
+    current: c ? { id: c.id, title: c.title, seconds: Math.round((now - c.startedAt) / 1000) } : null,
+    lastFinishedAt: health.lastFinishedAt || null,
+    stalled: !!c && now - c.startedAt > c.deadlineMs + 2 * 60_000,
+    failStreak: health.failStreak,
+  };
+}
+
+function closeAllSessions() {
+  for (const [, s] of sessions) { try { s.transport.stop(); } catch { /* ignore */ } }
+  sessions.clear();
+}
+
+async function process1(job: CrawlJob) {
+  const deadlineMs = deadlineFor(job);
+  health.current = { id: Number(job.id), title: job.title, startedAt: Date.now(), deadlineMs };
+  let outcome: JobOutcome;
+  try {
+    outcome = await withDeadline(`job "${job.title}"`, deadlineMs, () => runJob(job, engineDeps), closeAllSessions);
+  } catch (e: any) {
+    outcome = { status: "failed", error: e?.message || "unexpected error" };
+    if (e instanceof DeadlineError) void alertAdmin(`timeout:${job.id}`, `⏱ A crawl job got stuck and was stopped: "${job.title}". The queue moved on. Details: Admin → Crawl jobs.`);
+  }
+  await finishJob(job.id, outcome.status, outcome.result, outcome.error);
+  health.current = null;
+  health.lastFinishedAt = Date.now();
+  health.lastBeatAt = Date.now();
+
+  if (outcome.status === "done" || outcome.status === "not_found") health.failStreak = 0;
+  else if (outcome.status === "failed") {
+    health.failStreak++;
+    if (health.failStreak === 5) void alertAdmin("fail-streak", "⚠️ The crawler has failed 5 jobs in a row. A search bot may be down or the userbot signed out. Check Admin → Connections and Search bots.", 3 * 3_600_000);
+  }
+  if (outcome.status === "needs_admin" && job.source !== "companion") {
+    void alertAdmin(`needs-admin:${norm(job.title)}`, `🙋 "${job.title}" needs you: ${outcome.error || "a bot asked for something the crawler can't do"}. Open Admin → Crawl jobs to see the trace.`, 6 * 3_600_000);
+  }
+
+  await withDeadline("companion check", 30_000, () => queueCompanion(job, outcome)).catch((e) => console.warn("[crawler] companion check failed:", e?.message));
+  await withDeadline("notifier", 60_000, () => Promise.resolve(notifier?.(job, outcome))).catch((e) => console.warn("[crawler] notifier failed:", e?.message));
+}
+
+let lastSweep = 0;
+/** A job marked running for far longer than any deadline (e.g. its process died) goes back to failed, never silently forever. */
+async function sweepStuck() {
+  if (Date.now() - lastSweep < 120_000) return;
+  lastSweep = Date.now();
+  const r = await db.execute(`UPDATE crawl_jobs SET status='failed', error='stopped: it was running for over an hour', finished_at=CURRENT_TIMESTAMP WHERE status='running' AND started_at < datetime('now','-60 minutes')`);
+  if (r.rowsAffected) console.warn(`[crawler] swept ${r.rowsAffected} stuck job(s)`);
+}
+
 let running = false;
 let stopped = false;
 let wake: (() => void) | null = null;
@@ -161,7 +211,9 @@ async function workerLoop() {
   while (!stopped) {
     let job: CrawlJob | null = null;
     try { job = await claimNextJob(); } catch (e: any) { console.warn("[crawler] claim failed:", e?.message); }
+    health.lastBeatAt = Date.now();
     if (!job) {
+      await sweepStuck().catch(() => undefined);
       await new Promise<void>((r) => { wake = r; setTimeout(r, 5000); });
       continue;
     }

@@ -257,23 +257,27 @@ let activeUserInfo: { id?: string; username?: string; firstName?: string; phone?
 export { withBotLock } from "../crawler/lock.js";
 import { withBotLock } from "../crawler/lock.js";
 
+/** The storage channel for movies or series. Empty when none is configured: there is no built-in default any more. */
 export async function getEffectiveVaultChannelId(isSeries?: boolean): Promise<string> {
+  const movie = async () => {
+    const custom = await getSetting("telegram_vault_channel_id");
+    if (custom && custom.trim()) return custom.trim();
+    return (process.env.TELEGRAM_VAULT_CHANNEL_ID || "").trim();
+  };
   if (isSeries) {
     const customSeries = await getSetting("telegram_series_vault_channel_id");
     if (customSeries && customSeries.trim()) return customSeries.trim();
-    if (process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID && process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID.trim()) {
-      return process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID.trim();
-    }
-    return "-1003983385552"; // Dedicated BusiMovie TV Series Storage Channel
+    if (process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID && process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID.trim()) return process.env.TELEGRAM_SERIES_VAULT_CHANNEL_ID.trim();
+    return movie(); // no separate series channel: keep everything in the movie vault
   }
+  return movie();
+}
 
-  // Movies Storage Channel
-  const custom = await getSetting("telegram_vault_channel_id");
-  if (custom && custom.trim()) return custom.trim();
-  if (process.env.TELEGRAM_VAULT_CHANNEL_ID && process.env.TELEGRAM_VAULT_CHANNEL_ID.trim()) {
-    return process.env.TELEGRAM_VAULT_CHANNEL_ID.trim();
-  }
-  return "-1004314551318"; // Dedicated BusiMovie Movies Storage Channel
+/** Same, but throws a plain-English error when nothing is set up yet. */
+export async function requireVaultChannelId(isSeries?: boolean): Promise<string> {
+  const id = await getEffectiveVaultChannelId(isSeries);
+  if (!id) throw new Error("No storage channel is set up yet. Add one in Admin → Connections.");
+  return id;
 }
 
 export async function setEffectiveVaultChannelId(channelId: string): Promise<void> {

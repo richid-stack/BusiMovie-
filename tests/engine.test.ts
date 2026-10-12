@@ -168,3 +168,20 @@ test("browse: reads seasons and episodes from the bot and caches them", async ()
   assert.deepEqual(await B.cachedEpisodes("Severance", 2), [1, 2, 3]);
   assert.equal(await B.cachedEpisodes("Severance", 9), null);
 });
+
+test("engine: a bot that hangs is cut off after the deadline and the next bot is tried", async () => {
+  E.resetCooldowns();
+  const j = await job({ title: "Hang Test", year: "2001" });
+  let closed = 0;
+  const hang = { start() {}, stop() {}, send: () => new Promise(() => {}), click: () => new Promise(() => {}), settle: () => new Promise(() => {}), snapshot: () => new Promise(() => {}) } as any;
+  const d: any = deps({ "@a": hang, "@b": listWithFile("Hang.Test.2001.1080p.mkv") });
+  d.open = async (h: string) => (h === "@a" ? { transport: hang, close: async () => { closed++; } } : { transport: (d as any).__b, close: async () => {} });
+  (d as any).__b = listWithFile("Hang.Test.2001.1080p.mkv");
+  d.attemptMs = 150;
+  const started = Date.now();
+  const out = await E.runJob(j, d);
+  assert.equal(out.status, "done");
+  assert.equal(out.result!.bot, "@b");
+  assert.ok(Date.now() - started < 3000, "must not wait for the hung bot");
+  assert.ok(closed >= 1, "the hung conversation is closed");
+});

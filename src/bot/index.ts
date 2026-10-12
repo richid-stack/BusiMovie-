@@ -1,3 +1,4 @@
+import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { M, DAILY_REQUEST_LIMIT } from "./messages.js";
 import fs from "fs";
@@ -905,16 +906,7 @@ export async function setBotWebhook(bot: Telegraf, url: string) {
     await bot.telegram.setWebhook(fullUrl, {
       secret_token: getWebhookSecret(),
       drop_pending_updates: true,
-      allowed_updates: [
-        "message",
-        "edited_message",
-        "channel_post",
-        "edited_channel_post",
-        "callback_query",
-        "inline_query",
-        "chat_member",
-        "my_chat_member"
-      ]
+      allowed_updates: [...BOT_ALLOWED_UPDATES]
     });
     console.log(`[Telegram Webhook] Successfully set webhook to: ${fullUrl}`);
     return { success: true, url: fullUrl };

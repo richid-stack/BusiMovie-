@@ -7,7 +7,7 @@ import type { CrawlJob, JobStatus } from "./jobs.js";
 import { saveTrace } from "./jobs.js";
 import { navigate, Advisor, Goal, Transport, NavOutcome, TraceStep } from "./navigator.js";
 import { collectSeason, EpisodeResult } from "./season.js";
-import { withBotLock } from "./lock.js";
+import { withBotLock, withDeadline, DeadlineError } from "./lock.js";
 import type { Screen } from "./screen.js";
 
 export interface BotProfile {
@@ -29,6 +29,8 @@ export interface EngineDeps {
   expectedEpisodes?(job: CrawlJob): Promise<number | undefined>;
   onProgress?(job: CrawlJob, episodes: EpisodeResult[]): void | Promise<void>;
   settleMs?: number;
+  /** hard ceiling for one conversation with one bot (defaults: movie 4 min, episode 8, season 25) */
+  attemptMs?: number;
 }
 
 export interface JobOutcome {
@@ -71,8 +73,11 @@ export async function runJob(job: CrawlJob, deps: EngineDeps): Promise<JobOutcom
   const notes: string[] = [];
 
   for (const bot of bots) {
-    const outcome = await withBotLock(bot.handle, async (): Promise<JobOutcome | null> => {
+    const attemptMs = deps.attemptMs ?? (job.kind === "movie" ? 4 * 60_000 : job.kind === "season" ? 25 * 60_000 : 8 * 60_000);
+    let live: { close(): Promise<void> } | null = null;
+    const outcome = await withBotLock(bot.handle, () => withDeadline(bot.handle, attemptMs, async (): Promise<JobOutcome | null> => {
       const session = await deps.open(bot.handle).catch(() => null);
+      live = session;
       if (!session) { sawFailed++; notes.push(`${bot.handle}: could not open a conversation`); return null; }
       let trace: TraceStep[] = [];
       try {
@@ -125,6 +130,11 @@ export async function runJob(job: CrawlJob, deps: EngineDeps): Promise<JobOutcom
       } finally {
         await session.close().catch(() => undefined);
       }
+    }, async () => { await (live as any)?.close?.().catch?.(() => undefined); }), attemptMs + 30_000).catch(async (e: any) => {
+      if (!(e instanceof DeadlineError)) throw e;
+      await saveTrace(job.id, bot.handle, "timeout", e.message, []).catch(() => undefined);
+      sawFailed++; notes.push(`${bot.handle}: ${e.message}`);
+      return null;
     });
     if (outcome) return outcome;
   }

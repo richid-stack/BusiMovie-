@@ -1,3 +1,4 @@
+import { BOT_ALLOWED_UPDATES } from "./src/bot/updates.js";
 import express from "express";
 import path from "path";
 import { fetchNow, submitJob, startCrawlWorker, PRIORITY } from "./src/crawler/service.js";
@@ -40,6 +41,8 @@ import {
   deleteBotWebhook
 } from "./src/bot/index.js";
 import { startChannelWatcher, scheduleReconcile, targetStats, watcherState } from "./src/crawler/channels.js";
+import { workerHealth } from "./src/crawler/service.js";
+import { recentAlerts } from "./src/services/alerts.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
 import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
@@ -214,10 +217,7 @@ async function startServer() {
               await bot.telegram.setWebhook(info.url, {
                 secret_token: getWebhookSecret(),
                 drop_pending_updates: false,
-                allowed_updates: [
-                  "message", "edited_message", "channel_post", "edited_channel_post",
-                  "callback_query", "inline_query", "chat_member", "my_chat_member"
-                ]
+                allowed_updates: [...BOT_ALLOWED_UPDATES]
               });
               console.log("[Telegram Bot] Webhook re-registered with secret token.");
             } catch (e: any) {
@@ -229,16 +229,7 @@ async function startServer() {
             botMode = "polling";
             bot
               .launch({
-                allowedUpdates: [
-                  "message",
-                  "edited_message",
-                  "channel_post",
-                  "edited_channel_post",
-                  "callback_query",
-                  "inline_query",
-                  "chat_member",
-                  "my_chat_member"
-                ]
+                allowedUpdates: [...BOT_ALLOWED_UPDATES]
               })
               .then(() => {
                 console.log("[Telegram Bot] Successfully launched and listening in Long Polling mode.");
@@ -350,16 +341,7 @@ async function startServer() {
 
       // Re-enable polling
       bot.launch({
-        allowedUpdates: [
-          "message",
-          "edited_message",
-          "channel_post",
-          "edited_channel_post",
-          "callback_query",
-          "inline_query",
-          "chat_member",
-          "my_chat_member"
-        ]
+        allowedUpdates: [...BOT_ALLOWED_UPDATES]
       }).catch((launchErr: any) => console.warn("Polling restart:", launchErr?.message));
 
       botActive = true;
@@ -426,6 +408,8 @@ async function startServer() {
         },
         recentRequests: requests,
         recentLogs,
+        worker: workerHealth(),
+        alerts: recentAlerts(),
         recentUpdates: recentTelegramUpdates
       });
     } catch (error: any) {

@@ -168,17 +168,6 @@ export async function setupDatabase() {
   try { await db.execute("ALTER TABLE callback_cache ADD COLUMN expires_at INTEGER"); } catch { /* column already exists */ }
   await purgeExpiredCallbacks();
 
-  // Ensure default Movies & TV Series vault channel IDs are permanently linked
-  const currentVault = await getSetting("telegram_vault_channel_id");
-  if (!currentVault) {
-    await setSetting("telegram_vault_channel_id", "-1004314551318");
-  }
-
-  const currentSeriesVault = await getSetting("telegram_series_vault_channel_id");
-  if (!currentSeriesVault) {
-    await setSetting("telegram_series_vault_channel_id", "-1003983385552");
-  }
-
   // The database is the single source of truth (Turso in production). No mirrors, nothing to restore.
   if (!process.env.TURSO_DATABASE_URL && (process.env.K_SERVICE || process.env.NODE_ENV === "production")) {
     console.warn("[DB] WARNING: running on a local file database in a hosted environment. The disk is wiped on every restart. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.");

@@ -53,6 +53,11 @@ export default function Overview() {
     attention.push({ tone: "accent", title: `${s.pendingRequests} viewer request${s.pendingRequests === 1 ? "" : "s"} waiting`, body: "Fetch them automatically or mark them ready.", to: "/admin/requests", cta: "Review" });
   if (outcome.needs_admin)
     attention.push({ tone: "accent", title: `${outcome.needs_admin} crawl job${outcome.needs_admin === 1 ? "" : "s"} need you`, body: "A bot asked for something the crawler can't do alone.", to: "/admin/jobs", cta: "Open" });
+  const w = status.data?.worker;
+  if (w?.stalled)
+    attention.push({ tone: "bad", title: "The crawler looks stuck", body: `"${w.current?.title}" has been running for ${Math.round((w.current?.seconds || 0) / 60)} min. It will be stopped automatically; restart the app if it doesn't clear.`, to: "/admin/jobs", cta: "Open" });
+  else if (w && w.failStreak >= 3)
+    attention.push({ tone: "warn", title: `${w.failStreak} crawl jobs failed in a row`, body: "A search bot may be down or the userbot signed out.", to: "/admin/bots", cta: "Check bots" });
   if (crawler.data?.floodWaitActive)
     attention.push({ tone: "warn", title: "Telegram is rate-limiting the userbot", body: `Crawling resumes in about ${crawler.data.floodWaitCooldownSeconds}s.` });
 

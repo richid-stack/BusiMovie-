@@ -10,7 +10,7 @@
  */
 import { NewMessage } from "telegram/events/NewMessage.js";
 import { db, addMediaFile } from "../db/index.js";
-import { getConnectedClient, getEffectiveVaultChannelId, logActivity } from "../services/crawlerService.js";
+import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { forwardToVault } from "./vault.js";
 import { Pacer, tg } from "./flood.js";
 import { alreadyHave, judgePost, type ChannelPost, type HeldRow } from "./ingest.js";
@@ -100,7 +100,7 @@ export async function ingestPost(client: any, target: any, source: any, m: any):
   }
 
   try {
-    const vaultId = await getEffectiveVaultChannelId(v.isSeries);
+    const vaultId = await requireVaultChannelId(v.isSeries);
     if (!vaultId) throw new Error("no vault channel is set");
     const vault = await entityFor(client, vaultId);
     const copy = await forwardToVault(client, source, vault, post.msgId, post.size);
