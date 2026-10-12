@@ -19,6 +19,13 @@ const epTag = (s?: number, e?: number) =>
   s !== undefined && e !== undefined ? `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}` : "";
 
 export const M = {
+  // ── Join gate ──────────────────────────────────────────────
+  gateAsk: (kinds: Array<"discussion" | "ads" | "general">) =>
+    `🔒 <b>One quick step</b>\nJoin ${kinds.length > 1 ? "these channels" : "this channel"} and your pick is sent here automatically, no need to ask again.`,
+  gateStillMissing: (names: string[]) =>
+    `Not yet: I can't see you in ${names.map(esc).join(", ")}. Join, then tap the button again.`,
+  gateThanks: "✅ <b>Thanks for joining.</b> Here it comes…",
+  gateNothingWaiting: "✅ You're all set. Go ahead and pick something to watch.",
   // ── Requests ───────────────────────────────────────────────
   searching: (title: string) =>
     `🔎 <b>Looking for ${esc(title)}…</b>\nThis can take up to a minute.`,

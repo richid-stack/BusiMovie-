@@ -1,4 +1,6 @@
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
+import { installGate, gateOk } from "./gateFlow.js";
+import { setAlertSender } from "../services/alerts.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { M, DAILY_REQUEST_LIMIT } from "./messages.js";
 import fs from "fs";
@@ -581,6 +583,8 @@ async function handleMediaUpload(
 
 // Deliver media file helper (used by watch callback and start deep links)
 async function deliverMediaFile(ctx: any, fileId: number) {
+  // Required channels (Admin → Required channels): ask first, finish automatically once the viewer has joined.
+  if (!(await gateOk(ctx, { kind: "file", payload: { fileId } }))) return;
   let res = await db.execute({
     sql: "SELECT * FROM media_files WHERE id = ?",
     args: [fileId]
@@ -987,6 +991,12 @@ export function initializeBot(): Telegraf | null {
       }
     }
     return next();
+  });
+
+  // Join gate + alerts to the admins (needs the live bot)
+  installGate(bot, deliverMediaFile);
+  setAlertSender(async (ids, text) => {
+    for (const id of ids) await bot.telegram.sendMessage(id, text).catch(() => undefined);
   });
 
   // Global Inbound Update Logger and Diagnostic Tracker

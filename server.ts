@@ -38,9 +38,12 @@ import {
   sendSmartReEngagementBroadcast,
   getBotWebhookInfo,
   setBotWebhook,
-  deleteBotWebhook
+  deleteBotWebhook,
+  getBotInstance
 } from "./src/bot/index.js";
 import { startChannelWatcher, scheduleReconcile, targetStats, watcherState } from "./src/crawler/channels.js";
+import { getGateSettings, saveGateSettings, listGateChannels, addGateChannel, updateGateChannel, deleteGateChannel, normalizeChatRef, gateStats, joinLinkOf } from "./src/bot/gate.js";
+import { inspectChannel, ensureInviteLink } from "./src/bot/gateAdmin.js";
 import { workerHealth } from "./src/crawler/service.js";
 import { recentAlerts } from "./src/services/alerts.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
@@ -1069,6 +1072,57 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ================= REQUIRED CHANNELS (JOIN GATE) =================
+  app.get("/api/gate", async (_req, res) => {
+    try {
+      const [settings, channels, stats] = await Promise.all([getGateSettings(), listGateChannels(), gateStats()]);
+      res.json({ settings, stats, botRunning: !!getBotInstance(), channels: channels.map((c) => ({ ...c, link: joinLinkOf(c), members: stats.members[c.chat_id] ?? 0 })) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/gate/settings", async (req, res) => {
+    try { await saveGateSettings({ enabled: req.body?.enabled, ttlHours: req.body?.ttlHours }); res.json(await getGateSettings()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/gate/channels", async (req, res) => {
+    try {
+      const ref = normalizeChatRef(req.body?.ref);
+      if ("error" in ref) return res.status(400).json({ error: ref.error });
+      const kind = ["discussion", "ads", "general"].includes(req.body?.kind) ? req.body.kind : "general";
+      const mode = req.body?.mode === "request" ? "request" : "check";
+      const b = getBotInstance();
+      const look = b ? await inspectChannel(b, ref.chat_id) : null;
+      const id = await addGateChannel({
+        chat_id: ref.chat_id, username: look?.username ?? ref.username, title: (req.body?.title || look?.title || ref.chat_id).toString().slice(0, 80),
+        invite_link: req.body?.invite_link || null, kind, mode,
+      });
+      const row = (await listGateChannels()).find((c) => c.id === id)!;
+      if (b && look?.canInvite) await ensureInviteLink(b, row);
+      res.json({ success: true, id, inspection: look });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/gate/channels/:id", async (req, res) => {
+    try {
+      const { title, invite_link, kind, mode, active, position } = req.body || {};
+      await updateGateChannel(Number(req.params.id), { title, invite_link, kind, mode, active: active === undefined ? undefined : active ? 1 : 0, position });
+      res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/gate/channels/:id", async (req, res) => {
+    try { await deleteGateChannel(Number(req.params.id)); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/gate/channels/:id/test", async (req, res) => {
+    try {
+      const b = getBotInstance();
+      if (!b) return res.json({ ok: false, problem: "The Telegram bot isn't running." });
+      const row = (await listGateChannels()).find((c) => c.id === Number(req.params.id));
+      if (!row) return res.status(404).json({ error: "Not found" });
+      const look = await inspectChannel(b, row.chat_id);
+      let link = joinLinkOf(row);
+      if (look.canInvite && !link) link = await ensureInviteLink(b, row);
+      if (look.ok && look.title && row.title === row.chat_id) await updateGateChannel(row.id, { title: look.title });
+      res.json({ ...look, link, needsLink: !link });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ================= SERIES WISHLIST =================
