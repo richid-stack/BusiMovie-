@@ -1,7 +1,7 @@
 # BusiMovie — progress & handoff
 
 Branch: `claude/audit-fixes` (GitHub `richid-stack/BusiMovie-`). Plan: `implementation_plan.md` in the Claude project ("busimovie").
-Run: `npm i && npm run dev` · Tests: `npm test` (75 passing) · Typecheck: `npx tsc --noEmit` (clean).
+Run: `npm i && npm run dev` · Tests: `npm test` (102 passing) · Typecheck: `npx tsc --noEmit` (clean).
 Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to skip the splash).
 
 ## Done
@@ -48,6 +48,18 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 
 **Storefront Top 10** — anonymous per-title weekly view counter (`src/db/views.ts`, `POST /api/library/view`, de-duplicated per viewer per 30 min and rate limited); `/api/library` returns `views`, so "Top 10 this week" appears once titles are opened.
 
+**Quality policy** (`src/crawler/quality.ts`, `settings.ts`)
+- Keep every quality so the viewer chooses (720p is the smaller download). Anything below 720p is never accepted, and 4K is not wanted: both are rejected in the navigator, the season collector, `acquire` and channel ingest. Quality is read from the video's width/height first, then the file name; unknown is allowed through and labelled with the asked quality (or "HD").
+- Two qualities per title: setting `second_quality` (Admin → Search bots → Quality): `off` / `requested` (default) / `all`. After a title is saved, a quiet companion job (source `companion`, cron priority, one try per title+quality, never merged with viewer jobs, no user notification) asks for the missing 1080p↔720p tier. Batch imports queue a companion for titles already held when the mode is `all`.
+
+**Live channel watching** (`src/crawler/channels.ts`, `ingest.ts`)
+- Source channels are watched live (new-message listener, reconcile every 5 min and whenever targets change), with catch-up from `last_seen_id` after downtime. Every post goes through one sequential ingest path (mutex + 1.5 s pacer, `channel_ingest` idempotency): quality gate, min size, generic-name skip, dedupe, vault copy, index. Sources page shows Live / error / paused, saved vs skipped (with top skip reason), a quality filter and a backfill of 20–1000 posts (over 100 runs in the background).
+
+**Series wishlist** (`src/crawler/wishlist.ts`, Admin → Batch import → Series wishlist)
+- Ask for a show as everything, everything + new episodes (follows it, re-checks every 12 h) or chosen seasons. A runner (every 3 min, one show at a time) asks the series bot for the seasons and episodes (cached 24 h), compares with what the library holds, and submits one season job at a time (source `wishlist`, cron priority). A season is left alone for 6 h after a failure and after 3 tries in 24 h; a show pauses after 8 empty lookups. Progress (held / offered per season), status and a plain-English note are shown per show; pause, check now, remove.
+- Batch lists accept series lines: "Severance S2", "Dark S1-S3", "Breaking Bad complete series", "series: Succession", "Show (series)". They go to the wishlist; other lines stay in the movie queue.
+- API: `GET/POST /api/crawler/wishlist`, `PUT/DELETE /api/crawler/wishlist/:id`, `POST /api/crawler/wishlist/:id/run`.
+
 **Phase 6 — hygiene**
 - One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
 - Real app icons (they were mislabelled SVGs), PWA manifest now "BusiMovie" with ink/ember colours, README rewritten, `GEMINI_MODEL` setting (default `gemini-flash-latest`), `.env.example` cleaned (no Radarr/Sonarr).
@@ -55,7 +67,8 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 ## Next
 1. First live crawler run: read the traces (Admin → Crawl jobs) of the first few jobs and tune per-bot behaviour.
 2. Billboard uses the poster (the zero-key metadata sources give no wide backdrops). A `TMDB_API_KEY` would allow real backdrops.
-3. Optional later: mirror mode, persisted learned advisor rules, move the playground endpoints onto the new engine.
+3. Ideas not built yet (ask if wanted): Telegram alerts to the admin, a "wrong file" button for viewers, notify-me when a title lands, takedown tool, abuse controls, demand-first prioritisation, bot health auto-demote, daily caps, rebuild-from-vault.
+4. Optional later: mirror mode, persisted learned advisor rules, move the playground endpoints onto the new engine.
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
