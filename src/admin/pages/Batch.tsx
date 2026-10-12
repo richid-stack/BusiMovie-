@@ -3,6 +3,7 @@ import { FileUp, ListChecks, OctagonX, Play, RotateCw, Trash2 } from "lucide-rea
 import { api, timeAgo, useAct, useGet } from "../lib";
 import { Badge, Button, Card, Empty, Field, Input, Notice, PageHeader, Segmented, Select, Skeleton, Stat, TD, TH, THead, TR, Table, Textarea, Toggle, cx, type Tone } from "../ui/kit";
 import { useConfirm, useToast } from "../ui/overlay";
+import Wishlist from "./Wishlist";
 
 interface QItem { id: number; clean_title: string; year?: string; requested_quality: string; status: string; attempts: number; last_error?: string; bot_used?: string; source_csv?: string; updated_at: string }
 interface Cron {
@@ -55,6 +56,8 @@ export default function Batch() {
         <div className="lg:col-span-3"><Upload /></div>
         <div className="lg:col-span-2"><Scheduler cron={c} loading={cron.isLoading} /></div>
       </div>
+
+      <Wishlist />
 
       <Card
         title="Queue"
@@ -118,7 +121,7 @@ function Upload() {
   };
 
   return (
-    <Card title="Add titles" description="One title per line, or a CSV, spreadsheet export, Markdown or PDF list." className="h-full">
+    <Card title="Add titles" description="One title per line, or a CSV, spreadsheet export, Markdown or PDF list. Series lines like “Severance S2” go to the series wishlist." className="h-full">
       <div
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
@@ -138,8 +141,8 @@ function Upload() {
         </div>
       </div>
       {report && (
-        <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-          {[["Read", report.totalParsed, ""], ["Queued", report.queued, "text-emerald-300"], ["Duplicates", report.duplicatesSkipped, "text-zinc-400"]].map(([l, v, cls]) => (
+        <div className="mt-4 grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+          {[["Read", (report.totalParsed ?? 0) + (report.seriesAdded ?? 0), ""], ["Queued", report.queued ?? 0, "text-emerald-300"], ["Series added", report.seriesAdded ?? 0, "text-sky-300"], ["Duplicates", report.duplicatesSkipped ?? 0, "text-zinc-400"]].map(([l, v, cls]) => (
             <div key={l as string} className="rounded-lg border border-line bg-surface-2 py-2.5">
               <div className={cx("font-display text-lg font-semibold tabular-nums", (cls as string) || "text-white")}>{v as number}</div>
               <div className="text-[11px] text-zinc-500">{l as string}</div>

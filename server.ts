@@ -40,6 +40,7 @@ import {
   deleteBotWebhook
 } from "./src/bot/index.js";
 import { startChannelWatcher, scheduleReconcile, targetStats, watcherState } from "./src/crawler/channels.js";
+import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
 import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
@@ -180,6 +181,7 @@ async function startServer() {
       await initCrawlerService();
       await startCrawlWorker();
       startChannelWatcher();
+      startWishlistRunner();
       purgeOldViews().catch(() => {});
     })
     .catch((err) => {
@@ -1085,6 +1087,30 @@ async function startServer() {
     }
   });
 
+  // ================= SERIES WISHLIST =================
+  app.get("/api/crawler/wishlist", async (_req, res) => {
+    try { res.json({ wishes: await listWishes() }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/crawler/wishlist", async (req, res) => {
+    try {
+      const { title, year, mode, seasons } = req.body || {};
+      if (!title || typeof title !== "string" || title.trim().length < 2) return res.status(400).json({ error: "Give the series a title." });
+      const m = ["all", "seasons", "follow"].includes(mode) ? mode : "all";
+      const list = Array.isArray(seasons) ? seasons.map(Number).filter((n) => n >= 1 && n <= 60) : null;
+      if (m === "seasons" && !list?.length) return res.status(400).json({ error: "Pick at least one season." });
+      res.json({ success: true, ...(await addWish({ title: title.trim(), year, mode: m, seasons: m === "seasons" ? list : null })) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/crawler/wishlist/:id", async (req, res) => {
+    try { await updateWish(Number(req.params.id), req.body || {}); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/crawler/wishlist/:id", async (req, res) => {
+    try { await deleteWish(Number(req.params.id)); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/crawler/wishlist/:id/run", async (req, res) => {
+    try { await runWishNow(Number(req.params.id)); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ================= BATCH CRON CSV / PDF / MD INDEXER ROUTES =================
   app.post("/api/crawler/cron/upload-csv", async (req, res) => {
     try {
@@ -1111,8 +1137,21 @@ async function startServer() {
         return res.status(400).json({ error: "No readable movie titles found in the uploaded file." });
       }
 
-      const result = await parseAndQueueCsvMovies(textToParse, sourceName || "batch_upload.csv");
-      res.json({ success: true, ...result });
+      // Series lines ("Severance S2", "Show (series)", "series: Show") go to the wishlist; the rest are movies.
+      const movieLines: string[] = [];
+      let seriesAdded = 0;
+      for (const line of textToParse.split(/\r?\n/)) {
+        const wish = parseSeriesLine(line.replace(/^\s*["']|["']\s*$/g, ""));
+        if (wish) {
+          const r = await addWish(wish);
+          if (!r.existing) seriesAdded++;
+        } else movieLines.push(line);
+      }
+      const movieText = movieLines.join("\n");
+      const result: any = movieText.trim()
+        ? await parseAndQueueCsvMovies(movieText, sourceName || "batch_upload.csv")
+        : { totalParsed: 0, queued: 0, duplicatesSkipped: 0 };
+      res.json({ success: true, ...result, seriesAdded });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
