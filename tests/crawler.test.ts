@@ -127,6 +127,25 @@ test("wrong file is rejected after delivery", async () => {
   assert.equal(r.status, "wrong_file");
 });
 
+test("a 480p file is rejected even when the title matches", async () => {
+  const bot = new FakeBot(
+    { l: { text: "Results", buttons: [["Heat 1995"]], go: { "Heat 1995": "f" } }, f: { text: "", media: vid("Heat.1995.480p.DVDRip.mkv") } },
+    "l"
+  );
+  const r = await navigate(bot, movie("Heat", "1995"), { command: "heat" });
+  assert.equal(r.status, "wrong_file");
+  assert.match((r as any).reason, /below 720p/);
+});
+
+test("a file whose real dimensions are 480p is rejected even if the name says 1080p", async () => {
+  const bot = new FakeBot(
+    { l: { text: "Results", buttons: [["Heat 1995"]], go: { "Heat 1995": "f" } }, f: { text: "", media: { ...vid("Heat.1995.1080p.mkv"), width: 854, height: 480 } } },
+    "l"
+  );
+  const r = await navigate(bot, movie("Heat", "1995"), { command: "heat" });
+  assert.equal(r.status, "wrong_file");
+});
+
 // ── Pagination ──────────────────────────────────────────────────────────────
 test("pagination: follows Next until the title appears", async () => {
   const bot = new FakeBot(

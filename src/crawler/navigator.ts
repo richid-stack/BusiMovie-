@@ -11,6 +11,7 @@ import { Button, Screen } from "./screen.js";
 import { classifyScreen, ScreenKind, episodeNumberOf, seasonNumberOf, isEpisodeButton } from "./classify.js";
 import { isBackOrNavButton, selectBestMatchingButton } from "./buttons.js";
 import { verifyDownloadedFile } from "./verify.js";
+import { detectFromText, judgeQuality } from "./quality.js";
 
 export interface Observation {
   /** every screen seen during the settle window, in arrival order */
@@ -78,20 +79,24 @@ export interface NavOptions {
   now?: () => number;
 }
 
-const QUALITY_ORDER = ["1080p", "720p", "4k", "2160p", "480p", "360p"];
 const SEND_ALL = /\b(send\s*all|all\s*episodes?|get\s*all|download\s*all|full\s*season|whole\s*season)\b/i;
 const NEXT_PAGE = /^[\W_]*(?:next|more|›|»|>>|>|➡️?|▶️?)[\W_]*(?:page)?[\W_]*$/i;
 
+/**
+ * Pick the version button. Only 1080p/720p are ever chosen (never 4K or anything below 720p).
+ * Buttons that carry no resolution (e.g. "2.1 GB") are a last resort; the file itself is checked after it arrives.
+ */
 export function chooseQuality(buttons: Button[], preferred?: string): Button | null {
-  const usable = buttons.filter((b) => !isBackOrNavButton(b.text) && !(b.url && !/t\.me\//i.test(b.url)) && !/\b(sample|trailer|preview|cam|hdcam|telesync)\b/i.test(b.text));
-  if (!usable.length) return null;
-  const order = [preferred?.toLowerCase(), ...QUALITY_ORDER].filter(Boolean) as string[];
-  for (const q of order) {
-    const hit = usable.find((b) => b.text.toLowerCase().includes(q));
-    if (hit) return hit;
+  const usable = buttons.filter((b) => !isBackOrNavButton(b.text) && !(b.url && !/t\.me\//i.test(b.url)) && !/\b(sample|trailer|preview)\b/i.test(b.text));
+  const labelled = usable.map((b) => ({ b, q: detectFromText(b.text) }));
+  const want = [preferred?.toLowerCase(), "1080p", "720p"].filter((x, i, a) => x && a.indexOf(x) === i) as string[];
+  for (const q of want) {
+    const hit = labelled.find((x) => x.q === q);
+    if (hit) return hit.b;
   }
-  // bare size buttons ("2.1 GB"): take the first; every option is the same title
-  return usable[0];
+  const unlabelled = labelled.filter((x) => x.q === "unknown");
+  if (unlabelled.length) return unlabelled[0].b;
+  return null; // everything on offer is 4K or below 720p
 }
 
 export function findNextPage(buttons: Button[]): Button | null {
@@ -137,6 +142,8 @@ export async function navigate(t: Transport, goal: Goal, opts: NavOptions): Prom
         media.media?.fileName || "",
         media.text
       );
+      const qj = judgeQuality({ fileName: media.media?.fileName, caption: media.text, width: media.media?.width, height: media.media?.height });
+      if (!qj.ok) { log("MEDIA", qj.reason || "quality not accepted", "reject file", media); return { status: "wrong_file", reason: qj.reason || "quality not accepted", media, trace }; }
       log("MEDIA", v.ok ? (v.verified ? "file matches request" : "file name not comparable; accepted") : v.reason || "mismatch", v.ok ? "accept file" : "reject file", media);
       if (!v.ok) return { status: "wrong_file", reason: v.reason || "file does not match", media, trace };
       return { status: "media", media, verified: v.verified, trace };

@@ -21,7 +21,7 @@ export function mediaOf(m: any): MediaInfo | undefined {
   const mime = String(doc.mimeType || "");
   const isVideo = Boolean(video) || mime.startsWith("video/") || mime === "application/x-matroska" || (fileName ? VIDEO_EXT.test(fileName) : false);
   if (!isVideo) return undefined; // stickers, images, subtitles and PDFs are not what we're after
-  return { fileName, size: Number(doc.size || 0), mime, isVideo, durationSec: video?.duration ? Number(video.duration) : undefined };
+  return { fileName, size: Number(doc.size || 0), mime, isVideo, durationSec: video?.duration ? Number(video.duration) : undefined, width: video?.w ? Number(video.w) : undefined, height: video?.h ? Number(video.h) : undefined };
 }
 
 export function buttonsOf(m: any): Button[] {

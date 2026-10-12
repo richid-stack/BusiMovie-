@@ -34,6 +34,7 @@ export default function SearchBots() {
         description="External Telegram bots the crawler asks for files. It reads each bot's screens and clicks through on its own; tries them in priority order, then falls back to the next."
         actions={<Button variant="primary" icon={<Plus className="h-3.5 w-3.5" />} onClick={() => setEdit("new")}>Add bot</Button>}
       />
+      <QualityCard />
       {q.isLoading ? (
         <div className="space-y-3">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-24" />)}</div>
       ) : bots.length === 0 ? (
@@ -70,6 +71,29 @@ export default function SearchBots() {
       <BotForm bot={edit} onClose={() => setEdit(null)} />
       <Playground bot={test} onClose={() => setTest(null)} />
     </div>
+  );
+}
+
+function QualityCard() {
+  const q = useGet<{ secondQuality: "off" | "requested" | "all" }>(["crawler-settings"], "/api/crawler/settings");
+  const toast = useToast();
+  const save = useAct((secondQuality: string) => api("/api/crawler/settings", { body: { secondQuality } }), [["crawler-settings"]], () => toast.ok("Saved."));
+  return (
+    <Card className="mb-4" title="Quality" description="Viewers pick the version they want, so both are kept.">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="text-[13px] text-zinc-400">
+          <div className="mb-1.5 flex flex-wrap gap-1.5"><Badge tone="ok" dot>1080p</Badge><Badge tone="ok" dot>720p</Badge><Badge tone="bad" dot>Below 720p</Badge><Badge tone="neutral" dot>4K</Badge></div>
+          Only 1080p and 720p are saved. Anything below 720p, and 4K, is skipped, whichever bot or channel it comes from.
+        </div>
+        <Field label="Also get the second quality" hint="After a movie arrives, look for the other version at low priority so viewers' requests always go first.">
+          <Select value={q.data?.secondQuality || "requested"} disabled={!q.data} onChange={(e) => save.mutate(e.target.value, { onError: (er) => toast.err(er.message) })}>
+            <option value="requested">For titles viewers or you ask for</option>
+            <option value="all">For everything, including batch imports</option>
+            <option value="off">Off</option>
+          </Select>
+        </Field>
+      </div>
+    </Card>
   );
 }
 

@@ -42,7 +42,7 @@ setProgressHook((job, count) => seasonProgress.get(job.id)?.(count));
 // When a crawl finishes, tell everyone who asked for that title and went away.
 setJobNotifier(async (job, outcome) => {
   const b = getBotInstance();
-  if (!b || outcome.status !== "done") return;
+  if (!b || outcome.status !== "done" || job.source === "companion") return;
   const id = outcome.result?.mediaFileId ?? outcome.result?.episodes?.[0]?.mediaFileId;
   if (!id) return;
   const row = (await db.execute({ sql: "SELECT movie_title, year, quality FROM media_files WHERE id = ?", args: [id] })).rows[0] as any;

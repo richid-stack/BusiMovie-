@@ -8,6 +8,7 @@ import type { Goal, Transport } from "./navigator.js";
 import { chooseQuality } from "./navigator.js";
 import { classifyScreen } from "./classify.js";
 import { verifyDownloadedFile } from "./verify.js";
+import { judgeQuality } from "./quality.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 
 export interface EpisodeResult { episode: number; mediaFileId: number; vaultMsgId: number; fileName?: string }
@@ -66,6 +67,8 @@ export async function collectSeason(
       const name = s.media.fileName || "";
       const v = verifyDownloadedFile({ title: goal.title, year: goal.year, season: goal.season }, name, s.text);
       if (!v.ok) { rejected.push(`${name || "file"}: ${v.reason}`); continue; }
+      const qj = judgeQuality({ fileName: name, caption: s.text, width: s.media.width, height: s.media.height });
+      if (!qj.ok) { rejected.push(`${name || "file"}: ${qj.reason}`); continue; }
       const p = parseMediaTitleAndSeriesInfo(name || s.text || "");
       // index the episode number from the file we received; fall back to arrival order only when the name has none
       const ep = p.episode ?? undefined;

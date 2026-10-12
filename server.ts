@@ -39,6 +39,7 @@ import {
   setBotWebhook,
   deleteBotWebhook
 } from "./src/bot/index.js";
+import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
 import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
 import { getAIMovieRecommendations } from "./src/services/gemini.js";
 import {
@@ -1182,6 +1183,13 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  app.get("/api/crawler/settings", async (_req, res) => {
+    try { res.json(await getCrawlerSettings()); } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+  app.post("/api/crawler/settings", async (req, res) => {
+    try { res.json(await saveCrawlerSettings({ secondQuality: req.body?.secondQuality })); } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // Crawl jobs + the step-by-step trace of what each external bot showed and what we pressed

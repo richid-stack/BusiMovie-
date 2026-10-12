@@ -21,6 +21,9 @@ export interface MediaInfo {
   mime?: string;
   isVideo: boolean;
   durationSec?: number;
+  /** real video dimensions when Telegram reports them: the most reliable quality signal */
+  width?: number;
+  height?: number;
 }
 
 export interface Screen {

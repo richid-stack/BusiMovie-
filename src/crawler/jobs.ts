@@ -104,6 +104,9 @@ export async function enqueueJob(j: NewJob): Promise<{ id: number; existing: boo
   })).rows as unknown as CrawlJob[];
   const hit = open.find(
     (o) => norm(o.title) === norm(j.title) && (o.year ?? "") === (j.year ?? "") && (o.season ?? null) === (j.season ?? null) && (o.episode ?? null) === (j.episode ?? null)
+      // a second-quality (companion) job is its own thing: never merged with a viewer's request
+      && (o.source === "companion") === (j.source === "companion")
+      && (o.source !== "companion" || (o.quality ?? "") === (j.quality ?? ""))
   );
   if (hit) {
     const wanted = j.priority ?? PRIORITY.user;

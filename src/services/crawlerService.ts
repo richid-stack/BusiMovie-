@@ -1918,9 +1918,23 @@ export async function processCronBatch(limit: number = 5, isManualTrigger: boole
       // Quick secondary deduplication check in case it was added in the meantime
       const dupCheck = await checkVaultDuplicate(item.clean_title, item.requested_quality, item.year || undefined);
       if (dupCheck.isDuplicate) {
+        let note = dupCheck.reason || "Duplicate found in Vault";
+        try {
+          // "Second quality for everything": a title we hold in one quality gets a low-priority job for the other one.
+          const svc = await import("../crawler/service.js");
+          const { getCrawlerSettings } = await import("../crawler/settings.js");
+          const { missingTier } = await import("../crawler/quality.js");
+          if ((await getCrawlerSettings()).secondQuality === "all") {
+            const need = missingTier(await svc.heldQualities(item.clean_title, item.year));
+            if (need) {
+              await svc.submitJob({ kind: "movie", title: item.clean_title, year: item.year || null, quality: need, priority: svc.PRIORITY.cron, source: "companion" });
+              note += `; also looking for ${need}`;
+            }
+          }
+        } catch { /* the skip below still applies */ }
         await db.execute({
           sql: "UPDATE crawler_batch_queue SET status = 'duplicate_skipped', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-          args: [dupCheck.reason || "Duplicate found in Vault", item.id]
+          args: [note, item.id]
         });
         skipped++;
         logs.push(`⏭️ Skipped "${searchQuery}": ${dupCheck.reason}`);

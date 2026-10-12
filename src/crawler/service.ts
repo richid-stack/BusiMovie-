@@ -8,6 +8,9 @@ import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { GramTransport } from "./gramTransport.js";
 import { forwardToVault } from "./vault.js";
 import { verifyDownloadedFile } from "./verify.js";
+import { detectQuality, judgeQuality, labelFor, missingTier } from "./quality.js";
+import { getCrawlerSettings, wantsCompanion } from "./settings.js";
+import { normalizeTitleFuzzy } from "./verify.js";
 import { geminiAdvisor } from "./geminiAdvisor.js";
 import { runJob, BotProfile, EngineDeps, JobOutcome, commandFor } from "./engine.js";
 import { browseEpisodes, browseSeasons, cachedEpisodes, cachedSeasons, ensureBlueprintTable } from "./browse.js";
@@ -54,6 +57,12 @@ async function acquire(media: Screen, job: CrawlJob, botHandle: string, episode?
     const held = (await getSeriesSeasonEpisodes(job.title, job.season)).find((f) => Number(f.episode) === episode);
     if (held) return { mediaFileId: Number(held.id), vaultMsgId: Number(held.telegram_message_id || 0), fileName: String(held.file_name || "") };
   }
+  // Last line of defence for the quality policy (the navigator already checks, this covers every other path)
+  const qj = judgeQuality({ fileName: media.media?.fileName, caption: media.text, width: media.media?.width, height: media.media?.height });
+  if (!qj.ok) throw new Error(qj.reason || "quality not accepted");
+  if (job.source === "companion" && (qj.quality === "1080p" || qj.quality === "720p") && qj.quality !== job.quality) {
+    throw new Error(`the bot sent ${qj.quality} but ${job.quality} was wanted`);
+  }
   const vaultId = await getEffectiveVaultChannelId(isSeries);
   const vault = await s.client.getEntity(vaultId);
   const copy = await forwardToVault(s.client, s.botEntity, vault, media.msgId, media.media?.size);
@@ -77,7 +86,7 @@ async function acquire(media: Screen, job: CrawlJob, botHandle: string, episode?
     telegram_message_id: String(copy.vaultMsgId),
     file_name: fileName || `${title}.mkv`,
     file_size: Number(media.media?.size || copy.size || 0),
-    quality: parsed.quality || job.quality || "1080p",
+    quality: labelFor(detectQuality({ fileName, caption: media.text, width: media.media?.width, height: media.media?.height }), job.quality),
     language: "English",
     mime_type: media.media?.mime || "video/mp4",
     season,
@@ -113,7 +122,33 @@ async function process1(job: CrawlJob) {
     outcome = { status: "failed", error: e?.message || "unexpected error" };
   }
   await finishJob(job.id, outcome.status, outcome.result, outcome.error);
+  await queueCompanion(job, outcome).catch((e) => console.warn("[crawler] companion check failed:", e?.message));
   await Promise.resolve(notifier?.(job, outcome)).catch((e) => console.warn("[crawler] notifier failed:", e?.message));
+}
+
+/** Labels of the copies we hold for a movie (not series), matched by fuzzy title and year. */
+export async function heldQualities(title: string, year?: string | null): Promise<string[]> {
+  const rows = (await db.execute("SELECT movie_title, year, quality FROM media_files WHERE season IS NULL")).rows as any[];
+  const want = normalizeTitleFuzzy(title);
+  if (!want) return [];
+  return rows
+    .filter((r) => normalizeTitleFuzzy(String(r.movie_title || "")) === want && !(year && r.year && String(r.year) !== String(year)))
+    .map((r) => String(r.quality || "").toLowerCase());
+}
+
+/** After a movie lands, ask for the other quality (1080p ↔ 720p) at the lowest priority, once per title. */
+async function queueCompanion(job: CrawlJob, outcome: JobOutcome) {
+  if (outcome.status !== "done" || job.kind !== "movie") return;
+  const mode = (await getCrawlerSettings()).secondQuality;
+  if (!wantsCompanion(mode, job.source)) return;
+  const need = missingTier(await heldQualities(job.title, job.year));
+  if (!need) return;
+  const tried = (await db.execute({
+    sql: "SELECT 1 FROM crawl_jobs WHERE source = 'companion' AND kind = 'movie' AND quality = ? AND LOWER(title) = LOWER(?) AND COALESCE(year,'') = COALESCE(?, '') LIMIT 1",
+    args: [need, job.title, job.year ?? null],
+  })).rows;
+  if (tried.length) return; // one attempt per title and quality; the admin can retry it from Crawl jobs
+  await submitJob({ kind: "movie", title: job.title, year: job.year, quality: need, priority: PRIORITY.cron, source: "companion" });
 }
 
 let running = false;
