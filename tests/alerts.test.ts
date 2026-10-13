@@ -17,3 +17,12 @@ test("withDeadline: returns results, rethrows task errors, and cuts off a hung t
   await assert.rejects(withDeadline("slow", 40, () => new Promise(() => {}), () => { cleaned = true; }), DeadlineError);
   assert.equal(cleaned, true);
 });
+
+test("admin /wish command parsing", async () => {
+  const { parseWishCommand } = await import("../src/bot/adminCommands.js");
+  assert.deepEqual(parseWishCommand("Severance"), { title: "Severance", mode: "all", seasons: null });
+  assert.deepEqual(parseWishCommand("Dark S1-S3"), { title: "Dark", mode: "seasons", seasons: [1, 2, 3] });
+  assert.deepEqual(parseWishCommand("Succession follow"), { title: "Succession", mode: "follow", seasons: null });
+  assert.deepEqual(parseWishCommand("Ozark S3 follow"), { title: "Ozark", mode: "follow", seasons: null });
+  assert.equal(parseWishCommand(" "), null);
+});

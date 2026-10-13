@@ -42,7 +42,10 @@ export async function loadBots(): Promise<BotProfile[]> {
 
 async function openSession(handle: string) {
   const client = await getConnectedClient();
-  if (!client) return null;
+  if (!client) {
+    void alertAdmin("userbot-offline", "🔌 The userbot isn't signed in, so the crawler can't fetch anything. Sign in again: Admin → Connections.", 3 * 3_600_000);
+    return null;
+  }
   const botEntity = await client.getEntity(handleOf(handle));
   const transport = new GramTransport(client, botEntity);
   transport.start();

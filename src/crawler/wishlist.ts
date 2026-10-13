@@ -11,7 +11,7 @@
  */
 import { db, getSeriesSeasonEpisodes } from "../db/index.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
-import { cachedEpisodes, cachedSeasons } from "./browse.js";
+import { cachedEpisodes, cachedSeasons, ensureBlueprintTable } from "./browse.js";
 import { PRIORITY } from "./jobs.js";
 import { listEpisodes, listSeasons, submitJob } from "./service.js";
 import { getConnectedClient } from "../services/crawlerService.js";
@@ -109,6 +109,7 @@ export async function addWish(w: { title: string; year?: string | null; mode?: W
 
 export async function listWishes(): Promise<Array<Wish & { seasonsWanted: number[] | null; progress: Array<{ season: number; held: number; offered: number | null }>; running: boolean }>> {
   await ensureWishlistTable();
+  await ensureBlueprintTable();
   const rows = (await db.execute("SELECT * FROM series_wishlist ORDER BY id DESC")).rows as unknown as Wish[];
   const open = (await db.execute("SELECT title FROM crawl_jobs WHERE source='wishlist' AND status IN ('queued','running')")).rows as any[];
   const openKeys = new Set(open.map((o) => norm(String(o.title))));

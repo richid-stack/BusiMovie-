@@ -1,5 +1,6 @@
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { installGate, gateOk } from "./gateFlow.js";
+import { installAdminCommands } from "./adminCommands.js";
 import { setAlertSender } from "../services/alerts.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { M, DAILY_REQUEST_LIMIT } from "./messages.js";
@@ -45,6 +46,10 @@ setProgressHook((job, count) => seasonProgress.get(job.id)?.(count));
 // When a crawl finishes, tell everyone who asked for that title and went away.
 setJobNotifier(async (job, outcome) => {
   const b = getBotInstance();
+  if (b && job.requested_by?.startsWith("tg:") && job.source === "admin") {
+    const icon = outcome.status === "done" ? "✅ Saved" : outcome.status === "not_found" ? "🔍 Couldn't find" : outcome.status === "needs_admin" ? "🙋 Needs you" : "❌ Failed";
+    await b.telegram.sendMessage(job.requested_by.slice(3), `${icon}: <b>${escapeHtml(job.title)}</b>${outcome.status === "done" ? "" : outcome.error ? `\n<i>${escapeHtml(String(outcome.error).slice(0, 200))}</i>` : ""}`, { parse_mode: "HTML" }).catch(() => undefined);
+  }
   if (!b || outcome.status !== "done" || job.source === "companion") return;
   const id = outcome.result?.mediaFileId ?? outcome.result?.episodes?.[0]?.mediaFileId;
   if (!id) return;
@@ -995,6 +1000,7 @@ export function initializeBot(): Telegraf | null {
 
   // Join gate + alerts to the admins (needs the live bot)
   installGate(bot, deliverMediaFile);
+  installAdminCommands(bot);
   setAlertSender(async (ids, text) => {
     for (const id of ids) await bot.telegram.sendMessage(id, text).catch(() => undefined);
   });
