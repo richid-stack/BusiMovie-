@@ -25,3 +25,25 @@ test("a blocked title ignores 'The', punctuation and year unless both carry a di
   const any = [{ id: 3, kind: "title", title_key: titleKey("Ghost"), year: null }];
   assert.equal(matchTitle(any, "Ghost", "1990")?.id, 3);
 });
+
+import { assessBot, WINDOW, REST_MS } from "../src/crawler/botHealth.js";
+const at = (o: string, ago = 0, now = 1_000_000_000_000) => ({ outcome: o, at: now - ago });
+test("bot health: not-found and wrong-file never count against a bot", () => {
+  const h = assessBot(Array.from({ length: 10 }, () => at("not_found")), 1_000_000_000_000);
+  assert.equal(h.state, "ok");
+});
+test("bot health: pauses after repeated breakage, spares a bot with a recent success", () => {
+  const now = 1_000_000_000_000;
+  const broke = ["error", "timeout", "acquire_failed", "failed", "error", "done"].map((o, i) => at(o, i * 1000, now));
+  assert.equal(assessBot(broke, now).state, "demoted");
+  const mixed = ["error", "done", "error", "error", "error", "error"].map((o, i) => at(o, i * 1000, now));
+  assert.notEqual(assessBot(mixed, now).state, "demoted");
+  assert.equal(assessBot(["error", "error", "error", "done"].map((o, i) => at(o, i * 1000, now)), now).state, "degraded");
+});
+test("bot health: a rested bot gets another try, and a success clears it", () => {
+  const now = 1_000_000_000_000;
+  const old = ["error", "error", "error", "error", "error"].map((o, i) => at(o, REST_MS + 60_000 + i * 1000, now));
+  assert.equal(assessBot(old, now).state, "probation");
+  assert.equal(assessBot([at("done", 0, now), ...old], now).state, "ok");
+  assert.ok(WINDOW >= 5);
+});

@@ -14,6 +14,7 @@ export default function Connections() {
       </div>
       <Userbot />
       <Vaults />
+      <Rebuild />
     </div>
   );
 }
@@ -168,3 +169,26 @@ function Vaults() {
 }
 
 
+
+function Rebuild() {
+  const toast = useToast();
+  const q = useGet<any>(["rebuild"], "/api/library/rebuild", { every: 3000 });
+  const start = useAct(() => api("/api/library/rebuild", { body: {} }), [["rebuild"]], () => toast.ok("Rebuild started."));
+  const s = q.data;
+  const reasons = s ? Object.entries(s.skippedReasons || {}) as Array<[string, number]> : [];
+  return (
+    <Card title="Rebuild library from vault" description="If you ever lose the database or move to a new one, your files are still in the vault channels. This reads them again and re-indexes every film and episode. Files already indexed are skipped, and followers aren't notified.">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="primary" loading={start.isPending || !!s?.running} onClick={() => start.mutate(undefined as never, { onError: (e: Error) => toast.err(e.message) })}>{s?.running ? "Rebuilding…" : "Rebuild now"}</Button>
+        {s && s.startedAt && (
+          <span className="text-xs text-zinc-400">
+            {s.running ? "Reading the vault: " : s.error ? "Stopped: " : "Last run: "}
+            {s.scanned} messages read · <span className="text-emerald-300">{s.added} added</span> · {s.already} already there · {s.skipped} skipped
+          </span>
+        )}
+      </div>
+      {s?.error && <p className="mt-2 text-xs text-rose-300">{s.error}</p>}
+      {!s?.running && reasons.length > 0 && <p className="mt-2 text-xs text-zinc-500">Skipped because: {reasons.slice(0, 4).map(([r, n]) => `${r} (${n})`).join(" · ")}</p>}
+    </Card>
+  );
+}

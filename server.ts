@@ -48,6 +48,8 @@ import { workerHealth, probeBot, pressBotButton } from "./src/crawler/service.js
 import { recentAlerts } from "./src/services/alerts.js";
 import { banViewer, findViewer, getDailyCap, listBans, moderationStats, setDailyCap, takedownTitle, unbanViewer } from "./src/services/moderation.js";
 import { listBlocks, unblock } from "./src/crawler/blocklist.js";
+import { botHealthMap } from "./src/crawler/botHealth.js";
+import { rebuildState, startRebuild } from "./src/crawler/rebuild.js";
 import { isAdminTelegramId } from "./src/server/auth.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
@@ -977,10 +979,12 @@ async function startServer() {
   app.get("/api/crawler/bots", async (req, res) => {
     try {
       const bots = await getSearchBots();
+      const health = await botHealthMap().catch(() => ({} as Record<string, any>));
       res.json(bots.map((b: any) => {
         let scope: string | undefined;
         try { scope = b.profile ? JSON.parse(b.profile).scope : undefined; } catch { /* ignore */ }
-        return { ...b, scope: scope || (/quinson/i.test(b.bot_username) ? "series" : "movie") };
+        const h = health[`@${String(b.bot_username).replace(/^@/, "").toLowerCase()}`];
+        return { ...b, scope: scope || (/quinson/i.test(b.bot_username) ? "series" : "movie"), health: h ? { state: h.state, reason: h.reason } : null };
       }));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1069,6 +1073,13 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ================= REBUILD LIBRARY FROM VAULT =================
+  app.get("/api/library/rebuild", (_req, res) => res.json(rebuildState()));
+  app.post("/api/library/rebuild", async (_req, res) => {
+    try { const r = await startRebuild(); if (!r.started) return res.status(409).json({ error: r.reason }); res.json(rebuildState()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ================= SAFETY: takedowns, bans, daily limit, blocklist =================

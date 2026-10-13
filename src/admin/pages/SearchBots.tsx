@@ -6,7 +6,7 @@ import { Drawer, useConfirm, useToast } from "../ui/overlay";
 
 interface Bot {
   id: number; bot_username: string; bot_type: "inline" | "command"; command_template: string;
-  status: "active" | "degraded" | "inactive"; priority: number; success_count: number; last_queried_at: string | null;
+  status: "active" | "degraded" | "inactive"; health?: { state: "ok" | "degraded" | "demoted" | "probation"; reason: string } | null; priority: number; success_count: number; last_queried_at: string | null;
   scope?: "movie" | "series" | "both";
 }
 const SCOPE = { movie: "Movies", series: "Series", both: "Movies & series" } as const;
@@ -48,6 +48,9 @@ export default function SearchBots() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="truncate font-display text-sm font-semibold text-white">{b.bot_username}</span>
                     <Badge tone={b.status === "active" ? "ok" : b.status === "degraded" ? "warn" : "neutral"} dot>{b.status === "active" ? "Active" : b.status === "degraded" ? "Struggling" : "Off"}</Badge>
+                    {b.status === "active" && b.health?.state === "demoted" && <Badge tone="bad" dot>Paused: {b.health.reason}</Badge>}
+                    {b.status === "active" && b.health?.state === "degraded" && <Badge tone="warn" dot>{b.health.reason}</Badge>}
+                    {b.status === "active" && b.health?.state === "probation" && <Badge tone="warn" dot>Getting another try</Badge>}
                   </div>
                   <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-500">
                     <span>{SCOPE[b.scope || "movie"]}</span>

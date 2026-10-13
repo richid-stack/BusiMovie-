@@ -9,6 +9,7 @@ import { GramTransport, screenOfMessage } from "./gramTransport.js";
 import { forwardToVault } from "./vault.js";
 import { verifyDownloadedFile } from "./verify.js";
 import { whyBlocked } from "./blocklist.js";
+import { withoutDemoted } from "./botHealth.js";
 import { detectQuality, judgeQuality, labelFor, missingTier } from "./quality.js";
 import { getCrawlerSettings, wantsCompanion } from "./settings.js";
 import { normalizeTitleFuzzy } from "./verify.js";
@@ -114,7 +115,7 @@ let progressHook: ProgressHook | null = null;
 export function setProgressHook(fn: ProgressHook) { progressHook = fn; }
 
 const engineDeps: EngineDeps = {
-  bots: loadBots,
+  bots: async () => withoutDemoted(await loadBots()),
   open: openSession,
   acquire,
   blocked: (job) => whyBlocked({ title: job.title, year: job.year }),
