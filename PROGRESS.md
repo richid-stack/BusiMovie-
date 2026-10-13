@@ -1,7 +1,7 @@
 # BusiMovie — progress & handoff
 
 Branch: `claude/audit-fixes` (GitHub `richid-stack/BusiMovie-`). Plan: `implementation_plan.md` in the Claude project ("busimovie").
-Run: `npm i && npm run dev` · Tests: `npm test` (102 passing) · Typecheck: `npx tsc --noEmit` (clean).
+Run: `npm i && npm run dev` · Tests: `npm test` (136 passing) · Typecheck: `npx tsc --noEmit` (clean).
 Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to skip the splash).
 
 ## Done
@@ -60,18 +60,43 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 - Batch lists accept series lines: "Severance S2", "Dark S1-S3", "Breaking Bad complete series", "series: Succession", "Show (series)". They go to the wishlist; other lines stay in the movie queue.
 - API: `GET/POST /api/crawler/wishlist`, `PUT/DELETE /api/crawler/wishlist/:id`, `POST /api/crawler/wishlist/:id/run`.
 
+**Hang protection** (`src/crawler/lock.ts`, `engine.ts`, `service.ts`)
+- Every conversation with a bot has a hard ceiling (movie 4 min, episode 8, season 25) and every whole job too (15 / 25 / 45 min). A stalled Telegram call is cut off, the connection closed, the next bot tried and the queue moves on. Jobs stuck "running" for over an hour are swept to failed. `/api/status` returns `worker` health (current job, stalled, failure streak); the admin Overview shows it.
+- The previous author's hard-coded vault channel ids are gone. With no storage channel set, the crawler says so in plain words (Admin → Connections); series fall back to the movie vault.
+
+**Alerts and admin from Telegram** (`src/services/alerts.ts`, `src/bot/adminCommands.ts`)
+- Admins (`ADMIN_TELEGRAM_IDS`, after pressing Start once) get a Telegram message for: a stuck/timed-out job, a job that needs you (bot wants something the crawler can't do), 5 failures in a row, the userbot signed out, a required channel the bot can't read. Identical alerts are rate limited.
+- Admin-only commands: `/admin`, `/health`, `/queue`, `/fetch <title>` (you're messaged when it's done), `/wish <title> [S1-S3|follow]`, `/wishlist`, `/requests` (grouped, with Fetch / Ready buttons that tell every requester), `/gate` (on/off).
+
+**Required channels / join gate** (`src/bot/gate.ts`, `gateFlow.ts`, Admin → Required channels)
+- List your discussion channel, a community group or sponsor/ad channels. Before a file is delivered (Watch, episode, season, deep link) a viewer who isn't in them sees one Join button per channel plus "I've joined", and their request is remembered. The moment they join (Telegram `chat_member` update, a join-request approval, or the button) the remembered request is completed in their chat automatically (a pressed button is replayed, so it behaves exactly as if they had tapped it again). Telegram cannot move a user's screen; they get the file as a message plus a "Thanks for joining" note.
+- Needs the bot to be an admin of each channel (invite-users permission). Admins are never gated; browsing/searching is never gated; a channel the bot can't read never blocks anyone (admin is alerted). Join style "open" or "join request" (bot approves). Recheck window 1h–1w. Stats: asked / joined / completed automatically / waiting.
+
+**Viewer features** (`src/bot/viewerFeatures.ts`, `follow.ts`, `prefs.ts`, `reports.ts`)
+- After every delivery a small follow-up message: ⏭ Next episode, 💿 the other quality, 🔔 follow the series, ⚠️ wrong file.
+- Follow a series: one message when new episodes land; a whole season arriving is one message. `/following` to manage.
+- Wrong-file report: an admin gets Remove & re-fetch / Keep buttons; 3 different viewers (or an admin) removes the copy, queues a repair job at admin priority and tells the reporters when it lands. (Limitation: the bot may serve the same bad file again.)
+- `/quality`: ask each time / best quality / smaller download.
+- Demand-first queue: when several viewers ask for the same title, it jumps ahead of less-wanted jobs of the same priority.
+
+**Inline mode and groups** (`src/bot/discovery.ts`, `reach.ts`)
+- `@bot title` in any chat searches the library first (then metadata) with a Watch/Request button; an empty query shows recent additions.
+- Add the bot to a group (button in the welcome message). In groups it answers `/movie`, `/search`, `@bot title` and replies to it; plain chat is ignored; one answer per 3 s; every result is a button that opens the title in a private chat, so files are never dropped into a group. Admin commands still work there.
+
 **Phase 6 — hygiene**
 - One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
 - Real app icons (they were mislabelled SVGs), PWA manifest now "BusiMovie" with ink/ember colours, README rewritten, `GEMINI_MODEL` setting (default `gemini-flash-latest`), `.env.example` cleaned (no Radarr/Sonarr).
 
 ## Next
-1. First live crawler run: read the traces (Admin → Crawl jobs) of the first few jobs and tune per-bot behaviour.
-2. Billboard uses the poster (the zero-key metadata sources give no wide backdrops). A `TMDB_API_KEY` would allow real backdrops.
-3. Ideas not built yet (ask if wanted): Telegram alerts to the admin, a "wrong file" button for viewers, notify-me when a title lands, takedown tool, abuse controls, demand-first prioritisation, bot health auto-demote, daily caps, rebuild-from-vault.
-4. Optional later: mirror mode, persisted learned advisor rules, move the playground endpoints onto the new engine.
+1. First live crawler run: read the traces (Admin → Crawl jobs) of the first few jobs and tune per-bot behaviour. Nothing has run against the real Apple/Delta/EzPz/Quinson bots yet.
+2. Make the bot an admin in each required channel, press Test on the Required channels page, then switch the gate on.
+3. Billboard uses the poster (the zero-key metadata sources give no wide backdrops). A `TMDB_API_KEY` would allow real backdrops.
+4. Ideas not built yet (ask if wanted): takedown tool, abuse controls/daily caps, bot health auto-demote, rebuild-from-vault, find-by-description / voice / poster-screenshot (Gemini), weekly digest, group movie-night polls, remembering a bad file so the crawler skips it on re-fetch.
+5. Optional later: mirror mode, persisted learned advisor rules, move the Search-bot playground endpoints onto the new engine (`crawlerService.ts` still holds ~2,000 lines of legacy code).
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
 - Set secrets in AI Studio: `ADMIN_PASSWORD`, `ADMIN_TELEGRAM_IDS`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `TELEGRAM_USER_SESSION` (the session is no longer mirrored anywhere).
 - Firestore is no longer used at all; you can delete the Firestore database / rules in the Firebase console.
+- Start the bot once from your own Telegram account (admin ids in `ADMIN_TELEGRAM_IDS`) so it can send you alerts.
 - Optional: `GEMINI_API_KEY` (and `GEMINI_MODEL`) enables the AI advisor for unfamiliar bot screens.
