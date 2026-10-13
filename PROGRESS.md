@@ -75,13 +75,24 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 **Viewer features** (`src/bot/viewerFeatures.ts`, `follow.ts`, `prefs.ts`, `reports.ts`)
 - After every delivery a small follow-up message: ⏭ Next episode, 💿 the other quality, 🔔 follow the series, ⚠️ wrong file.
 - Follow a series: one message when new episodes land; a whole season arriving is one message. `/following` to manage.
-- Wrong-file report: an admin gets Remove & re-fetch / Keep buttons; 3 different viewers (or an admin) removes the copy, queues a repair job at admin priority and tells the reporters when it lands. (Limitation: the bot may serve the same bad file again.)
+- Wrong-file report: an admin gets Remove & re-fetch / Keep buttons; 3 different viewers (or an admin) removes the copy, queues a repair job at admin priority and tells the reporters when it lands. The exact file is remembered in the blocklist so a re-fetch can't bring the same copy back.
 - `/quality`: ask each time / best quality / smaller download.
 - Demand-first queue: when several viewers ask for the same title, it jumps ahead of less-wanted jobs of the same priority.
 
 **Inline mode and groups** (`src/bot/discovery.ts`, `reach.ts`)
 - `@bot title` in any chat searches the library first (then metadata) with a Watch/Request button; an empty query shows recent additions.
 - Add the bot to a group (button in the welcome message). In groups it answers `/movie`, `/search`, `@bot title` and replies to it; plain chat is ignored; one answer per 3 s; every result is a button that opens the title in a private chat, so files are never dropped into a group. Admin commands still work there.
+
+**Round 3 — caveats closed, safety, resilience, discovery**
+- *Legacy crawler retired.* The Search-bots playground and "forward" button now run on the new engine (`probeBot`, `pressBotButton` in `src/crawler/service.ts`); the old ~2,000-line legacy search/forward code is deleted (`crawlerService.ts` keeps only login/session, targets/bots CRUD, logging and the CSV batch queue).
+- *Blocklist* (`src/crawler/blocklist.ts`). Reported or removed files are remembered by file name + size (±1%); taken-down titles by normalised title (+year). Checked when a bot file is about to be stored, when a source channel post is ingested, when the vault is rebuilt, and before a job runs. Admin → Safety lists it with a Lift button.
+- *Takedown* (`src/services/moderation.ts`, Admin → Safety, `/takedown <title>` in Telegram with a confirm button): deletes every file of the title, deletes the vault copies through the userbot (best effort, failures are reported), cancels its queued jobs, pauses wishlist entries, blocks it for good.
+- *Abuse controls:* ban / unban by id or @username (banned viewers get nothing; admins can't be banned) and a per-viewer daily file cap (0 = off, resets 00:00 UTC, refunded when a delivery fails, admins exempt). Admin → Safety, `/ban`, `/unban`, `/cap`.
+- *Bot health auto-pause* (`src/crawler/botHealth.ts`): judged from the job traces. A bot whose last 4 meaningful attempts all broke (≥5 of the last 8) is skipped for ~3 h, you get a Telegram alert, and it gets one probation try afterwards; a success clears it. "Not found" and "wrong file" never count against a bot, and a kind of title is never left with no bot. Search bots page shows Paused / Struggling / Another try badges.
+- *Rebuild library from vault* (`src/crawler/rebuild.ts`, Admin → Connections): re-reads the vault channel(s) and re-indexes every film/episode from the file names. Already-indexed files are skipped, the blocklist is respected, followers aren't notified.
+- *Smart finder* (`src/bot/finder.ts`, needs `GEMINI_API_KEY`): a viewer can describe a film, send a voice note or a poster/screenshot and tap one of up to 4 suggested titles, which then runs a normal search. Typed searches that find nothing and read like a description fall into it too. 12 smart searches per viewer per day (admins unlimited).
+- *Weekly digest* (`src/bot/digest.ts`, Admin → Messaging, `/digest on|off|now`): "new this week" list, Friday 16:00+ UTC, once a week, off until you switch it on. Every message has "Stop weekly updates"; `/weekly` toggles it; people who blocked the bot are dropped automatically.
+- Tests: 155 passing (blocklist, moderation, bot health, rebuild, finder, digest added).
 
 **Phase 6 — hygiene**
 - One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
@@ -91,12 +102,14 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 1. First live crawler run: read the traces (Admin → Crawl jobs) of the first few jobs and tune per-bot behaviour. Nothing has run against the real Apple/Delta/EzPz/Quinson bots yet.
 2. Make the bot an admin in each required channel, press Test on the Required channels page, then switch the gate on.
 3. Billboard uses the poster (the zero-key metadata sources give no wide backdrops). A `TMDB_API_KEY` would allow real backdrops.
-4. Ideas not built yet (ask if wanted): takedown tool, abuse controls/daily caps, bot health auto-demote, rebuild-from-vault, find-by-description / voice / poster-screenshot (Gemini), weekly digest, group movie-night polls, remembering a bad file so the crawler skips it on re-fetch.
-5. Optional later: mirror mode, persisted learned advisor rules, move the Search-bot playground endpoints onto the new engine (`crawlerService.ts` still holds ~2,000 lines of legacy code).
+4. Ideas not built yet (ask if wanted): group movie-night polls, per-title "also removed from the vault" confirmation in the UI, navigator-level skipping of a blocked result (today a blocked file is refused when it arrives and the next bot is tried).
+5. Optional later: mirror mode, persisted learned advisor rules.
 
 ## Do these yourself
 - Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
 - Set secrets in AI Studio: `ADMIN_PASSWORD`, `ADMIN_TELEGRAM_IDS`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `TELEGRAM_USER_SESSION` (the session is no longer mirrored anywhere).
 - Firestore is no longer used at all; you can delete the Firestore database / rules in the Firebase console.
 - Start the bot once from your own Telegram account (admin ids in `ADMIN_TELEGRAM_IDS`) so it can send you alerts.
-- Optional: `GEMINI_API_KEY` (and `GEMINI_MODEL`) enables the AI advisor for unfamiliar bot screens.
+- Optional: `GEMINI_API_KEY` (and `GEMINI_MODEL`) enables the AI advisor for unfamiliar bot screens and the viewers' smart finder (description / voice / poster).
+- Decide the daily cap (Admin → Safety) and whether to switch on the weekly digest (Admin → Messaging); both start off.
+- Make the userbot able to delete in the vault channel(s) (admin with "delete messages") so takedowns also remove the stored copies.
