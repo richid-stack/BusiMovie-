@@ -44,7 +44,7 @@ import {
 import { startChannelWatcher, scheduleReconcile, targetStats, watcherState } from "./src/crawler/channels.js";
 import { getGateSettings, saveGateSettings, listGateChannels, addGateChannel, updateGateChannel, deleteGateChannel, normalizeChatRef, gateStats, joinLinkOf } from "./src/bot/gate.js";
 import { inspectChannel, ensureInviteLink } from "./src/bot/gateAdmin.js";
-import { workerHealth } from "./src/crawler/service.js";
+import { workerHealth, probeBot, pressBotButton } from "./src/crawler/service.js";
 import { recentAlerts } from "./src/services/alerts.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
@@ -100,7 +100,6 @@ import {
   addSearchBot,
   updateSearchBot,
   deleteSearchBot,
-  testQuerySearchBot,
   getCrawlerLogs,
   requestAuxiliaryLoginCode,
   verifyAuxiliaryLoginCode,
@@ -109,7 +108,6 @@ import {
   saveDirectSessionString,
   setEffectiveVaultChannelId,
   setEffectiveSeriesVaultChannelId,
-  fetchAndForwardBotMedia,
   getJoinedDialogs,
   parseAndQueueCsvMovies,
   processCronBatch,
@@ -1031,7 +1029,7 @@ async function startServer() {
       if (!bot_username || !query) {
         return res.status(400).json({ error: "bot_username and query are required" });
       }
-      const result = await testQuerySearchBot(bot_username, query);
+      const result = await probeBot(bot_username, query);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1044,12 +1042,8 @@ async function startServer() {
       if (!bot_username || !message_id) {
         return res.status(400).json({ error: "bot_username and message_id are required" });
       }
-      const result = await fetchAndForwardBotMedia({
-        botUsername: bot_username,
-        messageId: Number(message_id),
-        buttonRow: button_row !== undefined ? Number(button_row) : undefined,
-        buttonCol: button_col !== undefined ? Number(button_col) : undefined
-      });
+      if (button_row === undefined || button_col === undefined) return res.status(400).json({ error: "Pick a button to press" });
+      const result = await pressBotButton({ botUsername: bot_username, messageId: Number(message_id), row: Number(button_row), col: Number(button_col) });
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });

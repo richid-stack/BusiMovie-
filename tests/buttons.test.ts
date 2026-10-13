@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isBackOrNavButton, selectBestMatchingButton } from "../src/services/crawlerService.js";
+import { isBackOrNavButton, selectBestMatchingButton } from "../src/crawler/buttons.js";
 
 const btn = (text: string, i = 0) => ({ text, row: i, col: 0 });
 

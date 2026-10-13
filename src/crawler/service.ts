@@ -5,7 +5,7 @@
 import { db, addMediaFile, getSeriesSeasonEpisodes } from "../db/index.js";
 import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
-import { GramTransport } from "./gramTransport.js";
+import { GramTransport, screenOfMessage } from "./gramTransport.js";
 import { forwardToVault } from "./vault.js";
 import { verifyDownloadedFile } from "./verify.js";
 import { detectQuality, judgeQuality, labelFor, missingTier } from "./quality.js";
@@ -244,6 +244,79 @@ export async function submitJob(j: NewJob): Promise<{ id: number; existing: bool
 export async function requestAndWait(j: NewJob, waitMs = 90_000): Promise<{ id: number; job: CrawlJob | null }> {
   const { id } = await submitJob(j);
   return { id, job: await waitForJob(id, waitMs) };
+}
+
+// ── admin playground (Search bots → Test a bot) ───────────────────────────
+export interface ProbeResult {
+  bot: string; query: string; found: boolean; replyText?: string; messageId?: number; hasDirectMedia?: boolean;
+  buttons?: Array<{ text: string; row: number; col: number; data?: string; url?: string; isDownload?: boolean }>;
+  match?: { title: string; year: string; quality: string; file_size_bytes: number; file_name: string };
+  duration_ms: number; error?: string;
+}
+const DOWNLOADISH = /download|get|send|📥|⬇|watch|1080|720/i;
+const handleFor = (h: string) => (h.trim().startsWith("@") ? h.trim() : `@${h.trim()}`);
+
+/** Say something to a bot exactly like a viewer's request would, and report what it showed. */
+export async function probeBot(botUsername: string, query: string): Promise<ProbeResult> {
+  const started = Date.now();
+  const handle = handleFor(botUsername);
+  const out: ProbeResult = { bot: handle, query: query.trim(), found: false, duration_ms: 0 };
+  const done = (): ProbeResult => ({ ...out, duration_ms: Date.now() - started });
+  try {
+    const r = await withBotLock(handle, () => withDeadline(`${handle} test`, 90_000, async () => {
+      const s = await openSession(handle);
+      if (!s) throw new Error("The userbot isn't signed in. Sign in under Connections first.");
+      try {
+        const obs = await (s.transport as GramTransport).send(query.trim());
+        return obs.screens;
+      } finally { await s.close(); }
+    }));
+    out.found = r.length > 0;
+    const shown = [...r].reverse().find((x) => x.buttons.length || x.text) ?? r[r.length - 1];
+    if (shown) {
+      out.replyText = shown.text;
+      out.messageId = shown.msgId;
+      out.buttons = shown.buttons.map((b) => ({ text: b.text, row: b.row, col: b.col, data: b.data, url: b.url, isDownload: DOWNLOADISH.test(b.text) }));
+    }
+    const media = r.find((x) => x.media);
+    if (media?.media) {
+      out.hasDirectMedia = true;
+      const parsed = parseMediaTitleAndSeriesInfo(media.media.fileName || media.text || "");
+      out.match = { title: parsed.cleanTitle, year: parsed.year || "", quality: labelFor(detectQuality({ fileName: media.media.fileName, caption: media.text, width: media.media.width, height: media.media.height })), file_size_bytes: Number(media.media.size || 0), file_name: media.media.fileName || "" };
+      out.messageId = media.msgId;
+    }
+  } catch (e: any) {
+    out.error = e?.message || "The test failed";
+  }
+  return done();
+}
+
+/** Press one button on a bot message and, if a file comes back, store it like any crawl would. */
+export async function pressBotButton(p: { botUsername: string; messageId: number; row: number; col: number }): Promise<{ success: boolean; message: string; fileName?: string; fileSizeBytes?: number; mediaFileId?: number }> {
+  const handle = handleFor(p.botUsername);
+  return withBotLock(handle, () => withDeadline(`${handle} button`, 4 * 60_000, async () => {
+    const client = await getConnectedClient();
+    if (!client) throw new Error("The userbot isn't signed in. Sign in under Connections first.");
+    const s = await openSession(handle);
+    if (!s) throw new Error("Could not open a conversation with the bot.");
+    try {
+      const msgs: any[] = await client.getMessages(sessions.get(handle.toLowerCase())!.botEntity, { ids: [p.messageId] });
+      if (!msgs[0]) return { success: false, message: "That message is gone. Run the test again." };
+      const screen = screenOfMessage(msgs[0]);
+      const button = screen.buttons.find((b) => b.row === p.row && b.col === p.col);
+      if (!button) return { success: false, message: "That button is no longer on the message." };
+      if (button.url) return { success: false, message: "That button opens a link, so there is nothing to save." };
+      const t = s.transport as GramTransport;
+      let obs = await t.click(screen, button);
+      let media = obs.screens.find((x) => x.media);
+      if (!media) { obs = await t.settle(null, 20_000); media = obs.screens.find((x) => x.media); }
+      if (!media?.media) return { success: false, message: obs.answer ? `The bot said: ${obs.answer}` : "The bot didn't send a file." };
+      const parsed = parseMediaTitleAndSeriesInfo(media.media.fileName || media.text || "");
+      const job = { id: 0, kind: parsed.isSeries ? "episode" : "movie", title: parsed.cleanTitle || media.media.fileName || "Untitled", year: parsed.year || null, season: parsed.season ?? null, episode: parsed.episode ?? null, quality: null, priority: PRIORITY.admin, status: "running", source: "admin", requested_by: "playground", attempts: 1 } as unknown as CrawlJob;
+      const a = await acquire(media, job, handle, parsed.isSeries ? parsed.episode ?? undefined : undefined);
+      return { success: true, message: `Saved ${a.fileName || "the file"} to the vault.`, fileName: a.fileName, fileSizeBytes: Number(media.media.size || 0), mediaFileId: a.mediaFileId };
+    } finally { await s.close(); }
+  }));
 }
 
 // ── browsing (used by the bot's season/episode pickers) ───────────────────

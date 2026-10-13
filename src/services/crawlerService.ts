@@ -1,13 +1,8 @@
-import stringSimilarity from "string-similarity";
-import { addMediaFile, logChannelEvent, markRequestsFulfilled, db, getSetting, setSetting, deleteSetting } from "../db/index.js";
-import { searchMovies } from "./movieProvider.js";
-import { getOfficialTrailer } from "./trailerService.js";
+import { db, getSetting, setSetting, deleteSetting } from "../db/index.js";
 import { parseMediaTitleAndSeriesInfo, normalizeQuality } from "./seriesParser.js";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import axios from "axios";
-import fs from "fs";
-import path from "path";
 
 export interface CrawlerTarget {
   id: number;
@@ -255,7 +250,6 @@ let activeClient: TelegramClient | null = null;
 let activeUserInfo: { id?: string; username?: string; firstName?: string; phone?: string } | null = null;
 
 export { withBotLock } from "../crawler/lock.js";
-import { withBotLock } from "../crawler/lock.js";
 
 /** The storage channel for movies or series. Empty when none is configured: there is no built-in default any more. */
 export async function getEffectiveVaultChannelId(isSeries?: boolean): Promise<string> {
@@ -480,9 +474,8 @@ export async function verifyAuxiliaryLoginCode(code: string, password?: string):
   const apiId = Number(process.env.TELEGRAM_API_ID);
   const apiHash = process.env.TELEGRAM_API_HASH!;
 
-  let authResult: any;
   try {
-    authResult = await pendingClient.invoke(
+    await pendingClient.invoke(
       new Api.auth.SignIn({
         phoneNumber: pendingPhone,
         phoneCodeHash: pendingPhoneCodeHash,
@@ -494,7 +487,7 @@ export async function verifyAuxiliaryLoginCode(code: string, password?: string):
       if (!password) {
         throw new Error("2FA_PASSWORD_REQUIRED: Two-step verification is enabled on this Telegram account. Please enter your 2FA password.");
       }
-      authResult = await pendingClient.signInWithPassword(
+      await pendingClient.signInWithPassword(
         { apiId, apiHash },
         { 
           password: () => Promise.resolve(password),
@@ -748,11 +741,6 @@ export function getCrawlerLogs(): CrawlerActivityLog[] {
   return activityLogs;
 }
 
-export async function getSearchJobs(): Promise<SearchJob[]> {
-  const rows = (await db.execute("SELECT * FROM search_jobs ORDER BY created_at DESC LIMIT 50")).rows;
-  searchJobs = rows as unknown as SearchJob[];
-  return searchJobs;
-}
 
 /**
  * Execute a real MTProto historical backfill on a target channel.
@@ -771,554 +759,6 @@ export async function runChannelBackfill(targetId: number, messageLimit: number 
   return backfillTarget(targetId, messageLimit);
 }
 
-/**
- * Real-time MTProto Search Bot Query.
- * Sends the real search query to an external bot via Telegram MTProto,
- * captures the reply text, download buttons, and media options.
- */
-export async function testQuerySearchBot(botUsername: string, query: string): Promise<{
-  bot: string;
-  query: string;
-  found: boolean;
-  replyText?: string;
-  messageId?: number;
-  hasDirectMedia?: boolean;
-  buttons?: Array<{
-    text: string;
-    row: number;
-    col: number;
-    data?: string;
-    url?: string;
-    isDownload?: boolean;
-  }>;
-  match?: {
-    title: string;
-    year: string;
-    quality: string;
-    file_size_bytes: number;
-    file_name: string;
-  };
-  duration_ms: number;
-  error?: string;
-}> {
-  const startTime = Date.now();
-  const cleanQuery = query.trim();
-
-  const client = await getConnectedClient();
-  if (!client) {
-    throw new Error("Auxiliary Telegram account is not connected. Please connect your auxiliary Telegram account in the dashboard above.");
-  }
-
-  const cleanUsername = botUsername.trim().startsWith("@") ? botUsername.trim() : `@${botUsername.trim()}`;
-  let botEntity: any;
-  try {
-    botEntity = await client.getEntity(cleanUsername);
-  } catch (err: any) {
-    throw new Error(`Could not reach bot ${cleanUsername}: ${err.message}. Ensure the username is correct.`);
-  }
-
-  // Record baseline message ID from this bot before sending query
-  const prevMsgs = await client.getMessages(botEntity, { limit: 1 });
-  const lastId = prevMsgs[0]?.id || 0;
-
-  // Send search command/query to bot
-  await client.sendMessage(botEntity, { message: cleanQuery });
-
-  // Poll for up to 10 seconds for bot reply
-  let replyMsg: any = null;
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 1000));
-    const recent = await client.getMessages(botEntity, { limit: 5 });
-    const unread = recent.filter((m: any) => !m.out && m.id > lastId);
-    if (unread.length > 0) {
-      replyMsg = unread[0];
-      break;
-    }
-  }
-
-  const duration = Date.now() - startTime;
-
-  if (!replyMsg) {
-    return {
-      bot: cleanUsername,
-      query: cleanQuery,
-      found: false,
-      duration_ms: duration,
-      error: `Bot ${cleanUsername} did not reply within 10 seconds. It may be sleeping or rate-limited.`
-    };
-  }
-
-  // Attempt auto-joining public channels if the bot asks to join channels
-  if (replyMsg.message && /join\s*@/i.test(replyMsg.message)) {
-    const channelMatches = replyMsg.message.match(/@([a-zA-Z0-9_]+)/g) || [];
-    for (const cm of channelMatches) {
-      const chName = cm.replace("@", "");
-      if (chName.toLowerCase() !== cleanUsername.replace("@", "").toLowerCase()) {
-        try {
-          const chEnt = await client.getEntity(chName);
-          await client.invoke(new Api.channels.JoinChannel({ channel: chEnt }));
-        } catch (_) {}
-      }
-    }
-  }
-
-  // Parse inline buttons from the bot response
-  const buttons: Array<{
-    text: string;
-    row: number;
-    col: number;
-    data?: string;
-    url?: string;
-    isDownload?: boolean;
-  }> = [];
-
-  if (replyMsg.replyMarkup?.rows) {
-    replyMsg.replyMarkup.rows.forEach((row: any, rIdx: number) => {
-      row.buttons.forEach((btn: any, cIdx: number) => {
-        const isNav = /^\d+\/\d+$/.test(btn.text.trim()) || /^(next|back|previous|close)\s*[❯❮>|<]?$/i.test(btn.text.trim());
-        const isDl = !isNav && (
-          /\b(GB|MB|KB|1080p|720p|480p|4K|2160p|mkv|mp4|download|get)\b/i.test(btn.text) ||
-          (btn.data && btn.data.toString().startsWith("get_"))
-        );
-        buttons.push({
-          text: btn.text,
-          row: rIdx,
-          col: cIdx,
-          data: btn.data ? (Buffer.isBuffer(btn.data) ? btn.data.toString("utf8") : String(btn.data)) : undefined,
-          url: btn.url,
-          isDownload: isDl
-        });
-      });
-    });
-  }
-
-  const hasDirectMedia = Boolean(
-    replyMsg.media && (
-      replyMsg.media.className === "MessageMediaDocument" ||
-      replyMsg.media.className === "MessageMediaVideo" ||
-      replyMsg.document?.mimeType?.startsWith("video/")
-    )
-  );
-
-  const isNegativeReply = Boolean(
-    replyMsg.message && (
-      /no results? (found|matched)/i.test(replyMsg.message) ||
-      /not found/i.test(replyMsg.message) ||
-      /could not find/i.test(replyMsg.message) ||
-      /❌/i.test(replyMsg.message) ||
-      /nothing found/i.test(replyMsg.message) ||
-      /no matches/i.test(replyMsg.message)
-    )
-  );
-
-  const downloadButtons = buttons.filter(b => b.isDownload || /\b(1080p|720p|480p|4K|2160p|GB|MB|Download|Get)\b/i.test(b.text));
-  let isFound = !isNegativeReply && (downloadButtons.length > 0 || hasDirectMedia);
-
-  // Multi-Step Bot Auto-Resolver (e.g. for bots like @iPapkornEzPzBot, @iPapkornDeltaBot, @cinemagic_hd_bot where Step 1 is a movie title list)
-  if (!isFound && !hasDirectMedia && buttons.length > 0 && !isNegativeReply) {
-    const titleCandidates = buttons.filter(b => !isBackOrNavButton(b.text));
-    const bestTitleBtn = selectBestMatchingButton(titleCandidates, cleanQuery);
-
-    if (bestTitleBtn) {
-      console.log(`[Two-Step Auto-Resolver] Clicking title button "${bestTitleBtn.text}" on ${cleanUsername}...`);
-      try {
-        if (replyMsg.replyMarkup?.rows[bestTitleBtn.row]?.buttons[bestTitleBtn.col]) {
-          await replyMsg.click(replyMsg.replyMarkup.rows[bestTitleBtn.row].buttons[bestTitleBtn.col]);
-        } else {
-          throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
-        }
-
-        // Wait up to 6 seconds for step 2 (quality list or new message)
-        for (let i = 0; i < 6; i++) {
-          await new Promise(r => setTimeout(r, 1000));
-          const recent = await client.getMessages(botEntity, { limit: 4 });
-          const step2Msg = recent.find((m: any) => !m.out && m.id >= replyMsg.id && (m.id > replyMsg.id || m.editDate));
-          if (step2Msg) {
-            // Check if step 2 directly returned media
-            const step2HasMedia = Boolean(
-              step2Msg.media && (
-                (step2Msg.media as any).className === "MessageMediaDocument" ||
-                (step2Msg.media as any).className === "MessageMediaVideo" ||
-                step2Msg.document?.mimeType?.startsWith("video/")
-              )
-            );
-
-            if (step2HasMedia) {
-              return {
-                bot: cleanUsername,
-                query: cleanQuery,
-                found: true,
-                replyText: step2Msg.message,
-                messageId: step2Msg.id,
-                hasDirectMedia: true,
-                buttons: [],
-                duration_ms: Date.now() - startTime
-              };
-            }
-
-            if ((step2Msg.replyMarkup as any)?.rows) {
-              const step2Buttons: CandidateButton[] = [];
-              (step2Msg.replyMarkup as any).rows.forEach((row: any, rIdx: number) => {
-                row.buttons.forEach((btn: any, cIdx: number) => {
-                  const isNav = isBackOrNavButton(btn.text);
-                  const isDl = !isNav && (
-                    /\b(GB|MB|KB|1080p|720p|480p|4K|2160p|mkv|mp4|download|get|stream|watch)\b/i.test(btn.text) ||
-                    (btn.data && (btn.data.toString().startsWith("get_") || btn.data.toString().startsWith("dl_") || btn.data.toString().startsWith("file_")))
-                  );
-                  step2Buttons.push({
-                    text: btn.text,
-                    row: rIdx,
-                    col: cIdx,
-                    data: btn.data ? (Buffer.isBuffer(btn.data) ? btn.data.toString("utf8") : String(btn.data)) : undefined,
-                    url: btn.url,
-                    isDownload: isDl
-                  });
-                });
-              });
-
-              if (step2Buttons.length > 0) {
-                return {
-                  bot: cleanUsername,
-                  query: cleanQuery,
-                  found: true,
-                  replyText: step2Msg.message,
-                  messageId: step2Msg.id,
-                  hasDirectMedia: false,
-                  buttons: step2Buttons,
-                  duration_ms: Date.now() - startTime
-                };
-              }
-            }
-          }
-        }
-      } catch (clickErr: any) {
-        console.warn("[Two-Step Auto-Resolver] Click warning:", clickErr?.message);
-      }
-    }
-  }
-
-  // Increment bot success count if found
-  if (isFound) {
-    await db.execute({
-      sql: "UPDATE search_bots SET success_count = success_count + 1, last_queried_at = CURRENT_TIMESTAMP WHERE bot_username = ?",
-      args: [cleanUsername]
-    });
-  }
-
-  logActivity({
-    type: "bot_search",
-    source: cleanUsername,
-    title: `Queried Bot: "${cleanQuery}"`,
-    details: `Response in ${duration}ms. ${buttons.length} buttons, media: ${hasDirectMedia ? "Yes" : "Buttons"}, found: ${isFound}`,
-    status: isFound ? "success" : "filtered"
-  });
-
-  const firstDownloadBtn = downloadButtons[0] || (hasDirectMedia ? { text: replyMsg.message || cleanQuery } : null);
-  const fnMatch = firstDownloadBtn?.text || cleanQuery;
-
-  return {
-    bot: cleanUsername,
-    query: cleanQuery,
-    found: isFound,
-    replyText: replyMsg.message,
-    messageId: replyMsg.id,
-    hasDirectMedia,
-    buttons,
-    match: isFound ? {
-      title: cleanQuery,
-      year: fnMatch.match(/\b(19\d\d|20\d\d)\b/)?.[1] || "",
-      quality: fnMatch.match(/\b(2160p|4K|1080p|720p|480p)\b/i)?.[1]?.toUpperCase() || "HD",
-      file_size_bytes: 1000000000,
-      file_name: fnMatch
-    } : undefined,
-    duration_ms: duration
-  };
-}
-
-export { type CandidateButton, isBackOrNavButton, selectBestMatchingButton } from "../crawler/buttons.js";
-import { type CandidateButton, isBackOrNavButton, selectBestMatchingButton } from "../crawler/buttons.js";
-
-/**
- * Fetch a specific file from a search bot response and forward it directly to the Vault channel.
- * Real MTProto: Clicks the download button on Telegram, waits for the media document,
- * forwards it to your private channel, where your bot indexes it for users!
- */
-export async function fetchAndForwardBotMedia(params: {
-  botUsername: string;
-  messageId: number;
-  buttonRow?: number;
-  buttonCol?: number;
-  userTelegramId?: string | number;
-  isSeries?: boolean;
-  /** What the caller asked for; the downloaded file is checked against it before anything is forwarded. */
-  expect?: DownloadExpectation;
-}): Promise<{
-  success: boolean;
-  message: string;
-  fileName?: string;
-  fileSizeBytes?: number;
-  mediaFileId?: number;
-  channelMessageId?: string;
-  deliveredDirectly?: boolean;
-}> {
-  const client = await getConnectedClient();
-  if (!client) {
-    throw new Error("Auxiliary Telegram account is not connected.");
-  }
-
-  const vaultId = await getEffectiveVaultChannelId(params.isSeries);
-  if (!vaultId) {
-    throw new Error("No private storage channel configured.");
-  }
-
-  const vaultEntity = await client.getEntity(vaultId);
-  const cleanUsername = params.botUsername.trim().startsWith("@") ? params.botUsername.trim() : `@${params.botUsername.trim()}`;
-  const botEntity = await client.getEntity(cleanUsername);
-
-  let mediaMsgToForward: any = null;
-
-  if (params.buttonRow !== undefined) {
-    // Click the specific download button
-    const msgs = await client.getMessages(botEntity, { ids: [params.messageId] });
-    if (!msgs || msgs.length === 0) {
-      throw new Error("Original bot reply message not found.");
-    }
-
-    try {
-      const msg = msgs[0] as any;
-      if (msg.replyMarkup?.rows && msg.replyMarkup.rows[params.buttonRow]) {
-        const btn = msg.replyMarkup.rows[params.buttonRow].buttons[params.buttonCol || 0];
-        if (btn) {
-          await msg.click(btn);
-        } else {
-          throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
-        }
-      } else {
-        throw new Error("The button is no longer on the bot's screen; refusing to click blind.");
-      }
-    } catch (clickErr: any) {
-      console.warn("Button click error:", clickErr.message);
-    }
-
-    // Autonomous Intelligent Eye: Monitors bot state, automatically recognizes release file buttons,
-    // follows multi-step menus (Source -> Release File -> Media), and secures the media document.
-    let followUpClicks = 0;
-    const maxFollowUpClicks = 3;
-    const clickedMsgButtonKeys = new Set<string>();
-
-    for (let i = 0; i < 20; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      const recent = await client.getMessages(botEntity, { limit: 8 });
-
-      // 1. Check if media document has arrived
-      const found = recent.find((m: any) => !m.out && m.id >= params.messageId && (
-        (m.media as any)?.className === "MessageMediaDocument" ||
-        (m.media as any)?.className === "MessageMediaVideo" ||
-        (m.document as any)?.mimeType?.startsWith("video/") ||
-        (m.document as any)?.attributes?.some((a: any) => a.className === "DocumentAttributeVideo")
-      ));
-      if (found) {
-        mediaMsgToForward = found;
-        break;
-      }
-
-      // 2. Intelligent Eye Menu Inspector:
-      // If no media yet, inspect any new or updated messages containing inline buttons
-      if (followUpClicks < maxFollowUpClicks) {
-        const candidateMsg = recent.find((m: any) => 
-          !m.out && 
-          m.id >= params.messageId && 
-          (m.replyMarkup as any)?.rows?.length > 0 &&
-          (m.id > params.messageId || m.editDate)
-        );
-
-        if (candidateMsg) {
-          const allButtons: Array<{ text: string; row: number; col: number; data?: string; score: number }> = [];
-
-          (candidateMsg.replyMarkup as any).rows.forEach((row: any, rIdx: number) => {
-            row.buttons.forEach((btn: any, cIdx: number) => {
-              if (isBackOrNavButton(btn.text)) return;
-              const text = btn.text || "";
-              const dataStr = btn.data ? (Buffer.isBuffer(btn.data) ? btn.data.toString("utf8") : String(btn.data)) : "";
-
-              // Skip if back / cancel / report
-              if (/\b(go\s*back|back|cancel|report|issue|help|close)\b/i.test(text)) return;
-
-              let score = 0;
-              // File name with video extension (.mp4, .mkv, .avi)
-              if (/\.(mp4|mkv|avi|webm)\b/i.test(text)) score += 50;
-              // File size indicators (e.g. "908.54MB", "1.4GB", "700MB")
-              if (/\b\d+(\.\d+)?\s*(GB|MB|KB)\b/i.test(text)) score += 40;
-              // Encoding / Quality tags (WEBRip, BluRay, 1080p, 720p, 480p, x264, x265, HEVC)
-              if (/\b(1080p|720p|480p|4K|2160p|webrip|bluray|web-dl|x264|x265|hevc|dvdrip)\b/i.test(text)) score += 30;
-              // Action verbs
-              if (/\b(download|get file|start|send|download now|get)\b/i.test(text)) score += 20;
-              // Callback data patterns
-              if (/^(get_|dl_|file_|down_|f_)/i.test(dataStr)) score += 20;
-
-              if (score > 0) {
-                allButtons.push({ text, row: rIdx, col: cIdx, data: dataStr, score });
-              }
-            });
-          });
-
-          // Sort by highest score (files with size/extension take precedence)
-          allButtons.sort((a, b) => b.score - a.score);
-
-          if (allButtons.length > 0) {
-            const targetBtn = allButtons[0];
-            const clickKey = `${candidateMsg.id}:${targetBtn.row}:${targetBtn.col}`;
-
-            if (!clickedMsgButtonKeys.has(clickKey)) {
-              clickedMsgButtonKeys.add(clickKey);
-              followUpClicks++;
-              console.log(`[Intelligent Eye] Auto-advancing step ${followUpClicks}: Clicking "${targetBtn.text}" (score: ${targetBtn.score}) on ${cleanUsername}...`);
-
-              try {
-                if ((candidateMsg.replyMarkup as any).rows[targetBtn.row]?.buttons[targetBtn.col]) {
-                  await candidateMsg.click((candidateMsg.replyMarkup as any).rows[targetBtn.row].buttons[targetBtn.col]);
-                } else {
-                  await candidateMsg.click({ i: targetBtn.row, j: targetBtn.col } as any);
-                }
-              } catch (stepErr: any) {
-                console.warn("[Intelligent Eye] Follow-up click error:", stepErr?.message);
-              }
-            }
-          }
-        }
-      }
-    }
-  } else {
-    // Message already has direct media
-    const msgs = await client.getMessages(botEntity, { ids: [params.messageId] });
-    if (msgs && msgs[0]?.media) {
-      mediaMsgToForward = msgs[0];
-    }
-  }
-
-  if (!mediaMsgToForward) {
-    throw new Error("The bot did not return a video media message. If the bot required joining a channel, try clicking again now that channels are joined.");
-  }
-
-  // 0. Verification gate: refuse to store a file that is clearly not what was requested.
-  {
-    const preAttr = ((mediaMsgToForward.document as any)?.attributes || []).find((a: any) => a.className === "DocumentAttributeFilename") as any;
-    const preName = preAttr?.fileName || "";
-    const check = verifyDownloadedFile(params.expect, preName, mediaMsgToForward.message);
-    if (!check.ok) {
-      logActivity({
-        type: "vault_forward",
-        source: cleanUsername,
-        title: `Rejected wrong file from ${cleanUsername}`,
-        details: `${check.reason} (file: "${preName || "unnamed"}")`,
-        status: "failed"
-      } as any);
-      return { success: false, message: `The file from ${cleanUsername} did not match the request. ${check.reason}` };
-    }
-  }
-
-  // 1. Forward the real file into the storage channel for catalog preservation
-  const forwardedResult = await client.forwardMessages(vaultEntity, {
-    messages: [mediaMsgToForward.id],
-    fromPeer: botEntity
-  });
-
-  // Robustly extract the real channel message ID
-  let realChannelMsgId = "";
-  if (forwardedResult) {
-    if ((forwardedResult as any).updates && Array.isArray((forwardedResult as any).updates)) {
-      for (const u of (forwardedResult as any).updates) {
-        if (u.message?.id) {
-          realChannelMsgId = String(u.message.id);
-          break;
-        }
-        if (u.id) {
-          realChannelMsgId = String(u.id);
-          break;
-        }
-      }
-    }
-    if (!realChannelMsgId && (forwardedResult as any).id) {
-      realChannelMsgId = String((forwardedResult as any).id);
-    }
-    if (!realChannelMsgId && Array.isArray(forwardedResult) && forwardedResult[0]?.id) {
-      realChannelMsgId = String(forwardedResult[0].id);
-    }
-  }
-
-  // No guessing: without a confirmed channel message id the file could not be delivered reliably,
-  // and a wrong id would deliver someone else's upload — so we stop here instead.
-  if (!realChannelMsgId) {
-    return { success: false, message: "The file was sent but its storage position could not be confirmed. Please try again." };
-  }
-
-  // Ingest media to storage channel (our bot will deliver to user cleanly without external peer tags)
-  let deliveredDirectly = false;
-
-  const fnAttr = ((mediaMsgToForward.document as any)?.attributes || []).find((a: any) => a.className === "DocumentAttributeFilename") as any;
-  const fileName = fnAttr?.fileName || mediaMsgToForward.message || "Video.mp4";
-  const size = Number((mediaMsgToForward.document as any)?.size || 0);
-
-  const parsedInfo = parseMediaTitleAndSeriesInfo(fileName);
-  const parsedMovieTitle = parsedInfo.cleanTitle || fileName.replace(/\.[a-zA-Z0-9]+$/, "").trim();
-  const year = parsedInfo.year || "";
-  const quality = parsedInfo.quality || "1080p";
-
-  let newFileId: number | undefined;
-  try {
-    const existing = realChannelMsgId ? (await db.execute({
-      sql: "SELECT id FROM media_files WHERE telegram_channel_id = ? AND telegram_message_id = ? LIMIT 1",
-      args: [vaultId, realChannelMsgId]
-    })).rows : [];
-
-    if (existing.length === 0) {
-      newFileId = await addMediaFile({
-        movie_id: `tg_${Date.now()}`,
-        movie_title: parsedMovieTitle,
-        year,
-        telegram_file_id: String(mediaMsgToForward.id),
-        telegram_channel_id: vaultId,
-        telegram_message_id: realChannelMsgId,
-        file_name: fileName,
-        file_size: size,
-        quality,
-        language: "English",
-        mime_type: (mediaMsgToForward.document as any)?.mimeType || "video/mp4",
-        season: parsedInfo.isSeries ? (parsedInfo.season ?? 1) : null,
-        episode: parsedInfo.isSeries ? (parsedInfo.episode ?? null) : null
-      });
-      console.log(`[CrawlerService] Direct indexed forwarded media "${parsedMovieTitle}" as ID ${newFileId} with channel msg ${realChannelMsgId}`);
-    } else {
-      newFileId = Number(existing[0].id);
-      // Ensure telegram_message_id is updated if previously empty
-      if (realChannelMsgId) {
-        await db.execute({
-          sql: "UPDATE media_files SET telegram_message_id = ? WHERE id = ?",
-          args: [realChannelMsgId, newFileId]
-        });
-      }
-    }
-  } catch (idxErr: any) {
-    console.warn("Direct index in fetchAndForwardBotMedia error:", idxErr.message);
-  }
-
-  logActivity({
-    type: "vault_forward",
-    source: cleanUsername,
-    title: `Forwarded from ${cleanUsername}: ${parsedMovieTitle}${parsedInfo.isSeries && parsedInfo.season ? ` (S${parsedInfo.season}E${parsedInfo.episode || '?'})` : ''}`,
-    details: `Forwarded "${fileName}" to ${(vaultEntity as any)?.title || "Vault channel"} and indexed as "${parsedMovieTitle}".`,
-    status: "success"
-  });
-
-  return {
-    success: true,
-    message: `Forwarded "${parsedMovieTitle}" (${quality}) to BusiMovie channel and indexed!`,
-    fileName,
-    fileSizeBytes: size,
-    mediaFileId: newFileId,
-    channelMessageId: realChannelMsgId,
-  };
-}
 
 // =========================================================================
 // CSV BATCH CRON INDEXER & DEDUPLICATION ENGINE
@@ -1363,6 +803,7 @@ let cronConfig: CronConfig = {
 };
 
 let cronTimerHandle: NodeJS.Timeout | null = null;
+
 
 /**
  * Clean & normalize messy movie release titles. Delegates to the single canonical parser
@@ -1506,7 +947,7 @@ export async function lookupMovieYear(cleanTitle: string): Promise<string | unde
 }
 
 export { type DownloadExpectation, normalizeTitleFuzzy, verifyDownloadedFile } from "../crawler/verify.js";
-import { type DownloadExpectation, normalizeTitleFuzzy, verifyDownloadedFile } from "../crawler/verify.js";
+import { normalizeTitleFuzzy } from "../crawler/verify.js";
 
 
 export interface VaultIndexRow { movie_title: string; year: string | null; quality: string | null }
