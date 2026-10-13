@@ -1,6 +1,7 @@
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { installGate, gateOk } from "./gateFlow.js";
 import { installAdminCommands } from "./adminCommands.js";
+import { installReach, addToGroupLink } from "./reach.js";
 import { installViewerFeatures, afterDelivery } from "./viewerFeatures.js";
 import { getQualityPref, pickPreferred } from "./prefs.js";
 import { setAlertSender } from "../services/alerts.js";
@@ -1004,6 +1005,10 @@ export function initializeBot(): Telegraf | null {
   // Join gate + alerts to the admins (needs the live bot)
   installGate(bot, deliverMediaFile);
   installAdminCommands(bot);
+  installReach(bot, {
+    searchMeta: async (q) => (await searchMovies(q)).map((m: any) => { rememberTitle(m.id, m.title); return m; }).map((m: any) => ({ id: String(m.id), title: m.title, year: m.year, poster_path: m.poster_path, overview: m.overview, media_type: m.media_type })),
+    isSeries: (m) => isTvSeriesEntity(m as any),
+  });
   installViewerFeatures(bot, {
     showKeyOf: getShowKey,
     sizeLabel: formatFileSize,
@@ -1110,7 +1115,8 @@ export function initializeBot(): Telegraf | null {
 
     const welcomeButtons = Markup.inlineKeyboard([
       [Markup.button.callback("🔎 Search Catalog", "search_prompt"), Markup.button.callback("🔥 Trending Now", "trending")],
-      [Markup.button.callback("📺 Featured Series", "browse_series"), Markup.button.callback("🎲 Surprise Me", "surprise_me")]
+      [Markup.button.callback("📺 Featured Series", "browse_series"), Markup.button.callback("🎲 Surprise Me", "surprise_me")],
+      [Markup.button.url("➕ Add me to a group", addToGroupLink(ctx.botInfo.username)), Markup.button.switchToChat("🔎 Search in a chat", "")]
     ]);
 
     if (fs.existsSync(welcomePhotoPath)) {
@@ -2440,66 +2446,6 @@ export function initializeBot(): Telegraf | null {
       } catch (err: any) {
         console.log(`Bot joined channel notice note:`, err?.message || err);
       }
-    }
-  });
-
-  // Inline query mode: allows @BotUsername <movie> in any chat
-  bot.on("inline_query", async (ctx) => {
-    const query = ctx.inlineQuery.query.trim();
-    if (!query) {
-      return ctx.answerInlineQuery([]);
-    }
-
-    try {
-      const results = await searchMovies(query);
-      const inlineResults = await Promise.all(
-        results.slice(0, 8).map(async (movie) => {
-          rememberTitle(movie.id, movie.title);
-          const libFiles = await getMediaFilesForMovie(movie.id, movie.title);
-          const inVault = libFiles.length > 0;
-          const isShow = isTvSeriesEntity(movie);
-          const icon = isShow ? "📺" : "🎬";
-          const labelType = isShow ? "Series" : "Movie";
-
-          let messageText = `${icon} <b>${escapeHtml(movie.title)}</b> ${movie.year ? `(${movie.year})` : ""}\n\n`;
-          if (movie.overview) {
-            messageText += `${escapeHtml(movie.overview.substring(0, 250))}...\n\n`;
-          }
-
-          if (inVault) {
-            messageText += `✅ <b>Available on BusiMovie!</b> Quality: ${libFiles.map(f => f.quality || "HD").join(", ")}\n🍿 Stream directly via the button below:`;
-          } else {
-            messageText += `📝 Not in catalog yet. Tap below to request this ${labelType.toLowerCase()}!`;
-          }
-
-          const botUsername = ctx.botInfo.username;
-          
-          const keyboard = inVault
-            ? [[Markup.button.url("▶️ Watch in Bot", `https://t.me/${botUsername}?start=watch_${libFiles[0].id}`)]]
-            : [[Markup.button.url(`📝 Request ${labelType}`, `https://t.me/${botUsername}?start=req_${movie.id}`)]];
-
-          const searchStr = encodeURIComponent(movie.title);
-          keyboard.push([Markup.button.url("💬 Find Subtitles", `https://subdl.com/subtitle/search?q=${searchStr}`)]);
-
-          return {
-            type: "article" as const,
-            id: movie.id,
-            title: `${icon} ${movie.title} ${movie.year ? `(${movie.year})` : ""} ${inVault ? "🟢 [Available]" : ""}`,
-            description: movie.overview ? movie.overview.substring(0, 90) : (movie.cast || labelType),
-            thumb_url: movie.poster_path || undefined,
-            input_message_content: {
-              message_text: messageText,
-              parse_mode: "HTML" as const
-            },
-            reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
-          };
-        })
-      );
-
-      await ctx.answerInlineQuery(inlineResults, { cache_time: 15 });
-    } catch (err) {
-      console.error("Inline query error:", err);
-      await ctx.answerInlineQuery([]);
     }
   });
 
