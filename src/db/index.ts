@@ -11,6 +11,19 @@ const db = createClient(
     : { url: "file:movie-bot.db" }
 );
 
+// ── Read cost control (Turso bills rows READ, and a database over its monthly allowance is blocked) ──
+// Every write to media_files bumps a version; whole-library reads are cached until the version changes.
+let mediaVersion = 0;
+export const mediaWriteVersion = () => mediaVersion;
+const MEDIA_WRITE = /^\s*(insert|update|delete|replace|drop|alter)\b[\s\S]*?\bmedia_files\b/i;
+const rawExecute = db.execute.bind(db);
+(db as any).execute = async (stmt: any) => {
+  const sql = typeof stmt === "string" ? stmt : stmt?.sql;
+  const r = await rawExecute(stmt);
+  if (typeof sql === "string" && MEDIA_WRITE.test(sql)) mediaVersion++;
+  return r;
+};
+
 // Secrets must never be mirrored to disk JSON or Firestore (both were world-readable).
 const SECRET_SETTING_KEYS = new Set(["telegram_user_session"]);
 
@@ -134,6 +147,19 @@ export async function setupDatabase() {
   } catch (e: any) {
     // Ignore if column exists
   }
+
+  // Indexes for the lookups that used to scan the whole table on every file added or looked up.
+  // (Expression indexes must match the query text exactly, so the same expressions are used below.)
+  for (const ddl of [
+    `CREATE INDEX IF NOT EXISTS idx_media_msg ON media_files(telegram_channel_id, telegram_message_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_media_file_id ON media_files(telegram_file_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_media_title_lower ON media_files(LOWER(movie_title))`,
+    `CREATE INDEX IF NOT EXISTS idx_media_title_flat4 ON media_files(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(movie_title), ' ', ''), '.', ''), '-', ''), ':', ''))`,
+    `CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_channel_logs_created ON channel_logs(created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_media_title_flat3 ON media_files(REPLACE(REPLACE(REPLACE(LOWER(movie_title), '.', ''), ' ', ''), '_', ''))`,
+  ]) { try { await db.execute(ddl); } catch (e: any) { console.warn("Index skipped:", e?.message); } }
 
   // App settings key-value store for session strings, custom configs, and vault IDs
   await db.execute(`
@@ -462,14 +488,32 @@ export async function searchVaultFilesDirect(query: string): Promise<MediaFileRe
   });
 }
 
+let libraryCache: { rows: MediaFileRecord[]; version: number; at: number } | null = null;
+let libraryInflight: Promise<MediaFileRecord[]> | null = null;
+const LIBRARY_TTL_MS = 5 * 60_000;
+/** The whole library. Read from the database once per change (or every 5 min), not once per viewer search. */
 export async function getAllMediaFiles(): Promise<MediaFileRecord[]> {
-  try {
-    const res = await db.execute("SELECT * FROM media_files ORDER BY created_at DESC");
-    return res.rows as unknown as MediaFileRecord[];
-  } catch (err) {
-    console.error("Error getting all media files:", err);
-    return [];
-  }
+  if (libraryCache && libraryCache.version === mediaVersion && Date.now() - libraryCache.at < LIBRARY_TTL_MS) return libraryCache.rows.slice();
+  if (libraryInflight) return (await libraryInflight).slice();
+  const version = mediaVersion; // taken before reading: a write that lands mid-read makes this entry stale, never wrong
+  libraryInflight = (async () => {
+    try {
+      const res = await db.execute("SELECT * FROM media_files ORDER BY created_at DESC");
+      const rows = res.rows as unknown as MediaFileRecord[];
+      libraryCache = { rows, version, at: Date.now() };
+      return rows;
+    } catch (err) {
+      console.error("Error getting all media files:", err);
+      return [];
+    } finally { libraryInflight = null; }
+  })();
+  return (await libraryInflight).slice();
+}
+
+/** Library size and total bytes, taken from the cached library, so it costs no extra database reads. */
+export async function getLibraryTotals(): Promise<{ count: number; bytes: number }> {
+  const rows = await getAllMediaFiles();
+  return { count: rows.length, bytes: rows.reduce((n, f: any) => n + Number(f.file_size || 0), 0) };
 }
 
 export async function getMediaFileById(id: number): Promise<MediaFileRecord | null> {

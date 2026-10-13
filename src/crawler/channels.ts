@@ -9,7 +9,7 @@
  *  - `channel_ingest` remembers what happened to each post, so re-running a backfill never repeats work.
  */
 import { NewMessage } from "telegram/events/NewMessage.js";
-import { db, addMediaFile } from "../db/index.js";
+import { db, addMediaFile, mediaWriteVersion } from "../db/index.js";
 import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { forwardToVault } from "./vault.js";
 import { Pacer, tg } from "./flood.js";
@@ -77,6 +77,21 @@ async function bumpSeen(targetId: number, msgId: number) {
   await db.execute({ sql: "UPDATE crawler_targets SET last_seen_id = MAX(COALESCE(last_seen_id,0), ?) WHERE id = ?", args: [msgId, targetId] });
 }
 
+// The "do we already have this?" list is kept in memory and reloaded only when the library changes. Reading the whole
+// table for every channel post would cost (library size x posts) database reads, which adds up fast on Turso.
+let heldCache: { rows: HeldRow[]; version: number } | null = null;
+async function heldRows(): Promise<HeldRow[]> {
+  if (heldCache && heldCache.version === mediaWriteVersion()) return heldCache.rows;
+  const version = mediaWriteVersion();
+  const rows = (await db.execute("SELECT movie_title, year, quality, season, episode, file_name, file_size FROM media_files")).rows as unknown as HeldRow[];
+  heldCache = { rows, version };
+  return rows;
+}
+/** After our own insert (the only write since the list was loaded), add it to the list instead of reloading everything. */
+function noteSaved(versionBefore: number, row: HeldRow) {
+  if (heldCache && heldCache.version === versionBefore && mediaWriteVersion() === versionBefore + 1) { heldCache.rows.push(row); heldCache.version = versionBefore + 1; }
+}
+
 export async function ingestPost(client: any, target: any, source: any, m: any): Promise<IngestResult> {
   await ensureTables();
   const post = postOf(m);
@@ -99,7 +114,7 @@ export async function ingestPost(client: any, target: any, source: any, m: any):
     return { status: "skipped", reason: barred, title: v.title };
   }
 
-  const held = (await db.execute("SELECT movie_title, year, quality, season, episode, file_name, file_size FROM media_files")).rows as unknown as HeldRow[];
+  const held = await heldRows();
   const dup = alreadyHave(v, post.size, held);
   if (dup) {
     await record(target.id, post.msgId, "skipped", dup, v.title);
@@ -113,6 +128,7 @@ export async function ingestPost(client: any, target: any, source: any, m: any):
     const vault = await entityFor(client, vaultId);
     const copy = await forwardToVault(client, source, vault, post.msgId, post.size);
     const slug = v.title.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    const versionBefore = mediaWriteVersion();
     await addMediaFile({
       movie_id: v.isSeries ? `tg_series_${slug}_s${v.season}_e${v.episode}` : `tg_${slug}_${v.year || "x"}`,
       movie_title: v.title,
@@ -128,6 +144,7 @@ export async function ingestPost(client: any, target: any, source: any, m: any):
       season: v.season,
       episode: v.episode,
     } as any);
+    noteSaved(versionBefore, { movie_title: v.title, year: v.year, quality: v.quality, season: v.season, episode: v.episode, file_name: v.fileName, file_size: post.size });
     await record(target.id, post.msgId, "saved", undefined, v.title);
     await bumpSeen(target.id, post.msgId);
     await db.execute({ sql: "UPDATE crawler_targets SET total_files_found = total_files_found + 1, last_crawled_at = CURRENT_TIMESTAMP WHERE id = ?", args: [target.id] });

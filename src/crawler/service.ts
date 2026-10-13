@@ -2,7 +2,7 @@
  * Wiring: the real Telegram session, the vault, the database and the single background worker.
  * Everything the bot, the server and the cron indexer use to get a file goes through here.
  */
-import { db, addMediaFile, getSeriesSeasonEpisodes } from "../db/index.js";
+import { db, addMediaFile, getAllMediaFiles, getSeriesSeasonEpisodes } from "../db/index.js";
 import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { GramTransport, screenOfMessage } from "./gramTransport.js";
@@ -125,7 +125,7 @@ const engineDeps: EngineDeps = {
 
 /** Labels of the copies we hold for a movie (not series), matched by fuzzy title and year. */
 export async function heldQualities(title: string, year?: string | null): Promise<string[]> {
-  const rows = (await db.execute("SELECT movie_title, year, quality FROM media_files WHERE season IS NULL")).rows as any[];
+  const rows = (await getAllMediaFiles()).filter((f: any) => f.season === null || f.season === undefined) as any[]; // cached read
   const want = normalizeTitleFuzzy(title);
   if (!want) return [];
   return rows

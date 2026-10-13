@@ -94,6 +94,10 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 - *Weekly digest* (`src/bot/digest.ts`, Admin → Messaging, `/digest on|off|now`): "new this week" list, Friday 16:00+ UTC, once a week, off until you switch it on. Every message has "Stop weekly updates"; `/weekly` toggles it; people who blocked the bot are dropped automatically.
 - Tests: 155 passing (blocklist, moderation, bot health, rebuild, finder, digest added).
 
+**Database read cost (Turso)**
+- Turso's free plan allows 500M rows read / 10M written a month and *blocks* the database when a limit is passed (checked on turso.tech/pricing). Found and fixed the main read burners: the whole library was re-read on every viewer search (twice), every storefront load, every channel post and every admin library view; `COUNT(*)` of the searches/users/requests tables ran on every admin poll; title lookups on every file added (dedupe, season episodes, message-id check) scanned the full table.
+- Now: the library is cached in memory and re-read only after a write to `media_files` (the DB wrapper bumps a version; 5-minute ceiling); channel ingest keeps its own "already held" list; admin stats totals are cached (10 min) or derived from the cached library; new indexes on message id, file id, the three title expressions (query plans verified in `tests/readcost.test.ts`), requests and channel logs. The admin pages already stop polling in a hidden tab.
+
 **Phase 6 — hygiene**
 - One lockfile (`package-lock.json`), package renamed `busimovie`, stray test scripts and the old AI Studio plan removed.
 - Real app icons (they were mislabelled SVGs), PWA manifest now "BusiMovie" with ink/ember colours, README rewritten, `GEMINI_MODEL` setting (default `gemini-flash-latest`), `.env.example` cleaned (no Radarr/Sonarr).

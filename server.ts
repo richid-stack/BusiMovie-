@@ -8,6 +8,7 @@ import {
   setupDatabase,
   db,
   getAllMediaFiles,
+  getLibraryTotals,
   getDatabaseInfo,
   purgeExpiredCallbacks,
   addMediaFile,
@@ -132,6 +133,15 @@ process.on("unhandledRejection", (reason: any) => {
 process.on("uncaughtException", (err: any) => {
   console.error("[uncaughtException]", err?.message || err);
 });
+
+const countCache = new Map<string, { n: number; at: number }>();
+async function cachedCount(key: string, sql: string, ttlMs: number): Promise<number> {
+  const c = countCache.get(key);
+  if (c && Date.now() - c.at < ttlMs) return c.n;
+  const n = Number((await db.execute(sql)).rows[0]?.count ?? 0);
+  countCache.set(key, { n, at: Date.now() });
+  return n;
+}
 
 async function startServer() {
   const app = express();
@@ -377,15 +387,14 @@ async function startServer() {
 
       if (dbReady) {
         try {
-          usersCount = (await db.execute("SELECT COUNT(*) as count FROM users")).rows[0]?.count as number || 0;
-          searchesCount = (await db.execute("SELECT COUNT(*) as count FROM searches")).rows[0]?.count as number || 0;
-          requestsCount = (await db.execute("SELECT COUNT(*) as count FROM requests")).rows[0]?.count as number || 0;
-          const pendingRes = await db.execute("SELECT COUNT(*) as count FROM requests WHERE status = 'pending'");
-          pendingRequestsCount = (pendingRes.rows[0]?.count as number) || 0;
-
-          const libStat = (await db.execute("SELECT COUNT(*) as count, SUM(file_size) as total_size FROM media_files")).rows[0];
-          libraryCount = (libStat?.count as number) || 0;
-          totalLibrarySize = (libStat?.total_size as number) || 0;
+          // Counting a big table reads every row (and Turso bills rows read), so these totals are cached.
+          usersCount = await cachedCount("users", "SELECT COUNT(*) as count FROM users", 10 * 60_000);
+          searchesCount = await cachedCount("searches", "SELECT COUNT(*) as count FROM searches", 10 * 60_000);
+          requestsCount = await cachedCount("requests", "SELECT COUNT(*) as count FROM requests", 10 * 60_000);
+          pendingRequestsCount = Number((await db.execute("SELECT COUNT(*) as count FROM requests WHERE status = 'pending'")).rows[0]?.count ?? 0); // indexed: reads only the pending rows
+          const lib = await getLibraryTotals();
+          libraryCount = lib.count;
+          totalLibrarySize = lib.bytes;
           requests = (await db.execute("SELECT * FROM requests ORDER BY created_at DESC LIMIT 10")).rows || [];
           recentLogs = await getChannelLogs(10);
         } catch (dbErr) {
