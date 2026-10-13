@@ -50,6 +50,7 @@ import { banViewer, findViewer, getDailyCap, listBans, moderationStats, setDaily
 import { listBlocks, unblock } from "./src/crawler/blocklist.js";
 import { botHealthMap } from "./src/crawler/botHealth.js";
 import { rebuildState, startRebuild } from "./src/crawler/rebuild.js";
+import { digestSettings, previewDigest, sendDigest, setDigestEnabled } from "./src/bot/digest.js";
 import { isAdminTelegramId } from "./src/server/auth.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
@@ -1073,6 +1074,19 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ================= WEEKLY DIGEST =================
+  app.get("/api/digest", async (_req, res) => {
+    try { const [s, p] = await Promise.all([digestSettings(), previewDigest()]); res.json({ ...s, preview: p ? { count: p.count, text: p.text } : null, botRunning: !!getBotInstance() }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/digest", async (req, res) => {
+    try { await setDigestEnabled(!!req.body?.enabled); res.json(await digestSettings()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/digest/send", async (_req, res) => {
+    try { const b = getBotInstance(); if (!b) return res.status(409).json({ error: "The bot isn't running." }); res.json(await sendDigest(b)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ================= REBUILD LIBRARY FROM VAULT =================

@@ -304,3 +304,46 @@ Output only pure JSON.`;
   }
 }
 
+
+// --- Find a title from what a viewer remembers: a description, a voice note, or a poster/screenshot ---
+export interface IdentifiedTitle { title: string; year?: string; kind?: "movie" | "tv" }
+export interface IdentifyResult { heard?: string; titles: IdentifiedTitle[] }
+export interface IdentifyInput { text?: string; media?: { data: Buffer; mime: string } }
+
+/** Pure: Gemini's JSON (maybe fenced, maybe sloppy) → a clean, short list. Exported for tests. */
+export function parseIdentifyJson(raw: string): IdentifyResult {
+  let t = String(raw || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = t.indexOf("{"), end = t.lastIndexOf("}");
+  if (start < 0 || end <= start) return { titles: [] };
+  let j: any;
+  try { j = JSON.parse(t.slice(start, end + 1)); } catch { return { titles: [] }; }
+  const seen = new Set<string>();
+  const titles: IdentifiedTitle[] = [];
+  for (const x of Array.isArray(j.titles) ? j.titles : []) {
+    const title = String(x?.title ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
+    if (title.length < 2 || seen.has(title.toLowerCase())) continue;
+    seen.add(title.toLowerCase());
+    const y = String(x?.year ?? "").match(/\b(19|20)\d{2}\b/);
+    titles.push({ title, year: y ? y[0] : undefined, kind: x?.kind === "tv" || x?.kind === "series" ? "tv" : "movie" });
+    if (titles.length >= 5) break;
+  }
+  const heard = typeof j.heard === "string" && j.heard.trim() ? j.heard.trim().slice(0, 300) : undefined;
+  return heard ? { heard, titles } : { titles };
+}
+
+export function aiFinderAvailable(): boolean { return !!process.env.GEMINI_API_KEY; }
+
+export async function identifyTitles(input: IdentifyInput): Promise<IdentifyResult | null> {
+  const ai = getAIClient();
+  if (!ai) return null;
+  const what = input.media?.mime.startsWith("audio/") ? "a voice note in which someone describes or names a movie or TV series (transcribe what they asked for in \"heard\")"
+    : input.media ? "a poster, screenshot or still from a movie or TV series"
+    : "a description of a movie or TV series someone is trying to remember";
+  const prompt = `You help people find movies and TV series. Input: ${what}.${input.text ? `\n\nDescription: """${input.text.slice(0, 600)}"""` : ""}\n\n` +
+    `Reply with JSON only: {"heard":"short transcript or what you understood","titles":[{"title":"official title","year":"YYYY","kind":"movie"|"tv"}]}. ` +
+    `Give up to 4 of the most likely titles, best first. Only real, released titles. If you can't tell, return an empty list. Never invent a title.`;
+  const parts: any[] = [{ text: prompt }];
+  if (input.media) parts.push({ inlineData: { mimeType: input.media.mime, data: input.media.data.toString("base64") } });
+  const res = await executeGeminiWithFallback((model) => ai.models.generateContent({ model, contents: [{ role: "user", parts }], config: { responseMimeType: "application/json", temperature: 0.2 } }));
+  return parseIdentifyJson(res.text || "");
+}

@@ -1,4 +1,6 @@
 import { allowDelivery, giveBackDelivery, installGuard } from "./guard.js";
+import { installFinder } from "./finder.js";
+import { installDigest, startDigestScheduler } from "./digest.js";
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { installGate, gateOk } from "./gateFlow.js";
 import { installAdminCommands } from "./adminCommands.js";
@@ -1010,6 +1012,9 @@ export function initializeBot(): Telegraf | null {
   installGuard(bot);
   installGate(bot, deliverMediaFile);
   installAdminCommands(bot);
+  installDigest(bot);
+  startDigestScheduler(bot);
+  const findByDescription = installFinder(bot, { search: (c, q) => executeMovieSearch(c, q) });
   installReach(bot, {
     searchMeta: async (q) => (await searchMovies(q)).map((m: any) => { rememberTitle(m.id, m.title); return m; }).map((m: any) => ({ id: String(m.id), title: m.title, year: m.year, poster_path: m.poster_path, overview: m.overview, media_type: m.media_type })),
     isSeries: (m) => isTvSeriesEntity(m as any),
@@ -2550,6 +2555,7 @@ export function initializeBot(): Telegraf | null {
 
     const totalHits = vaultSeries.length + vaultMovies.length + onlineResults.length;
     if (totalHits === 0) {
+      if (await findByDescription(ctx, query)) return; // sounds like a description: let the AI suggest titles
       const qKey = getQueryKey(query);
       await ctx.reply(
         `🔍 <b>No Results Found for:</b> "${escapeHtml(query)}"\n\n` +

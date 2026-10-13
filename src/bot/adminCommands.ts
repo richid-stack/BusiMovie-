@@ -104,6 +104,7 @@ export function installAdminCommands(bot: Telegraf) {
       "/wishlist: wishlist progress",
       "/requests: what viewers want",
       "/gate: required channels",
+      "/digest: weekly \"new this week\" message (<code>/digest on</code>, <code>/digest now</code>)",
       "/takedown <i>title</i>: remove a title everywhere and block it for good",
       "/ban <i>id or @name</i> [reason], /unban <i>id or @name</i>",
       "/cap <i>number</i>: files per viewer per day (0 = no limit)",
