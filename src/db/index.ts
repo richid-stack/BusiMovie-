@@ -870,9 +870,15 @@ export async function addMediaFile(file: Omit<MediaFileRecord, "id" | "created_a
     ]
   });
   const insertId = Number(res.lastInsertRowid || 0);
-  
+  try { mediaAddedHook?.({ id: insertId, title: movie_title, year, season, episode, quality }); } catch { /* hooks never break indexing */ }
+
   return insertId;
 }
+
+export interface AddedMedia { id: number; title: string; year: string; season: number | null; episode: number | null; quality: string }
+let mediaAddedHook: ((m: AddedMedia) => void) | null = null;
+/** Called after a brand-new file is indexed (not for duplicates). The bot uses it to tell followers. */
+export function setMediaAddedHook(fn: ((m: AddedMedia) => void) | null) { mediaAddedHook = fn; }
 
 export async function deleteMediaFile(id: number): Promise<boolean> {
   try {

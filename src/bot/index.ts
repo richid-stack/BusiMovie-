@@ -1,6 +1,8 @@
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { installGate, gateOk } from "./gateFlow.js";
 import { installAdminCommands } from "./adminCommands.js";
+import { installViewerFeatures, afterDelivery } from "./viewerFeatures.js";
+import { getQualityPref, pickPreferred } from "./prefs.js";
 import { setAlertSender } from "../services/alerts.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { M, DAILY_REQUEST_LIMIT } from "./messages.js";
@@ -661,6 +663,7 @@ async function deliverMediaFile(ctx: any, fileId: number) {
     if (currentBotInstance && ctx.chat?.id && sentMessage.message_id) {
       registerEphemeralMessage(currentBotInstance, ctx.chat.id, sentMessage.message_id);
     }
+    await afterDelivery(ctx, file);
     return;
   }
 
@@ -1001,6 +1004,11 @@ export function initializeBot(): Telegraf | null {
   // Join gate + alerts to the admins (needs the live bot)
   installGate(bot, deliverMediaFile);
   installAdminCommands(bot);
+  installViewerFeatures(bot, {
+    showKeyOf: getShowKey,
+    sizeLabel: formatFileSize,
+    ephemeral: (chatId, msgId, ms) => registerEphemeralMessage(bot, chatId, msgId, ms),
+  });
   setAlertSender(async (ids, text) => {
     for (const id of ids) await bot.telegram.sendMessage(id, text).catch(() => undefined);
   });
@@ -2128,6 +2136,9 @@ export function initializeBot(): Telegraf | null {
 
     await ctx.answerCbQuery();
 
+    const preferred = pickPreferred(qualities, await getQualityPref(ctx.from!.id));
+    if (preferred) return deliverMediaFile(ctx, Number(preferred.id));
+
     const yrText = year ? `(${escapeHtml(year)})` : (qualities[0].year ? `(${escapeHtml(qualities[0].year)})` : "");
     const first = qualities[0];
 
@@ -2212,6 +2223,8 @@ export function initializeBot(): Telegraf | null {
     const movieMeta = movieKeyCache.get(mKey);
     if (movieMeta) {
       const qualities = await getMovieQualities(file.movie_title, file.year);
+      const preferred = pickPreferred(qualities, await getQualityPref(ctx.from!.id));
+      if (preferred) { await ctx.answerCbQuery().catch(() => undefined); return deliverMediaFile(ctx, Number(preferred.id)); }
       if (qualities.length > 1) {
         const qualityButtons: any[] = [];
         for (const qFile of qualities) {

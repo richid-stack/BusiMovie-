@@ -69,6 +69,7 @@ export async function ensureCrawlerTables(): Promise<void> {
     )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_crawl_traces_job ON crawl_traces(job_id)`);
   try { await db.execute(`ALTER TABLE search_bots ADD COLUMN profile TEXT`); } catch { /* exists */ }
+  try { await db.execute(`ALTER TABLE crawl_jobs ADD COLUMN demand INTEGER NOT NULL DEFAULT 1`); } catch { /* exists */ }
   await resetInterruptedJobs();
   await purgeOldTraces();
 }
@@ -111,6 +112,8 @@ export async function enqueueJob(j: NewJob): Promise<{ id: number; existing: boo
   if (hit) {
     const wanted = j.priority ?? PRIORITY.user;
     if (wanted < hit.priority && hit.status === "queued") await db.execute({ sql: `UPDATE crawl_jobs SET priority=? WHERE id=?`, args: [wanted, hit.id] });
+    // another viewer wants the same thing: it moves ahead of less-wanted jobs of the same priority
+    if (hit.status === "queued" && (j.source ?? "user") === "user") await db.execute({ sql: `UPDATE crawl_jobs SET demand = demand + 1 WHERE id=?`, args: [hit.id] });
     return { id: Number(hit.id), existing: true };
   }
   const r = await db.execute({
@@ -127,7 +130,7 @@ export async function getJob(id: number): Promise<CrawlJob | null> {
 
 /** Highest priority first, then oldest. Only one worker runs, so a plain select+update is safe. */
 export async function claimNextJob(): Promise<CrawlJob | null> {
-  const r = await db.execute(`SELECT * FROM crawl_jobs WHERE status='queued' ORDER BY priority ASC, id ASC LIMIT 1`);
+  const r = await db.execute(`SELECT * FROM crawl_jobs WHERE status='queued' ORDER BY priority ASC, demand DESC, id ASC LIMIT 1`);
   const job = r.rows[0] as unknown as CrawlJob | undefined;
   if (!job) return null;
   const u = await db.execute({ sql: `UPDATE crawl_jobs SET status='running', started_at=CURRENT_TIMESTAMP, attempts=attempts+1 WHERE id=? AND status='queued'`, args: [job.id] });
