@@ -1,3 +1,4 @@
+import { allowDelivery, giveBackDelivery, installGuard } from "./guard.js";
 import { BOT_ALLOWED_UPDATES } from "./updates.js";
 import { installGate, gateOk } from "./gateFlow.js";
 import { installAdminCommands } from "./adminCommands.js";
@@ -593,6 +594,7 @@ async function handleMediaUpload(
 async function deliverMediaFile(ctx: any, fileId: number) {
   // Required channels (Admin → Required channels): ask first, finish automatically once the viewer has joined.
   if (!(await gateOk(ctx, { kind: "file", payload: { fileId } }))) return;
+  if (!(await allowDelivery(ctx))) return;
   let res = await db.execute({
     sql: "SELECT * FROM media_files WHERE id = ?",
     args: [fileId]
@@ -600,6 +602,7 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   let file = res.rows[0];
 
   if (!file) {
+    await giveBackDelivery(ctx);
     await ctx.reply(
       "❌ <b>Title Unavailable</b>\n\nThis title is currently being prepared for streaming. Please check back shortly or search for another title.",
       { parse_mode: "HTML" }
@@ -669,6 +672,7 @@ async function deliverMediaFile(ctx: any, fileId: number) {
   }
 
   // Delivery failed or message ID was absent: provide intelligent fallback button
+  await giveBackDelivery(ctx);
   const failButtons: any[] = [];
   if (file.season && file.episode) {
     const showKey = getShowKey(String(file.movie_title));
@@ -1003,6 +1007,7 @@ export function initializeBot(): Telegraf | null {
   });
 
   // Join gate + alerts to the admins (needs the live bot)
+  installGuard(bot);
   installGate(bot, deliverMediaFile);
   installAdminCommands(bot);
   installReach(bot, {

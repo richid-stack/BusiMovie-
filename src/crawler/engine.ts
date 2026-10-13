@@ -24,6 +24,8 @@ export interface EngineDeps {
   open(handle: string): Promise<{ transport: Transport; close(): Promise<void> } | null>;
   /** forward → confirm vault message → index. Throw if anything cannot be confirmed. */
   acquire(media: Screen, job: CrawlJob, bot: string, episode?: number): Promise<AcquireResult>;
+  /** A reason this title must not be fetched at all (takedown list), or null. */
+  blocked?(job: CrawlJob): Promise<string | null>;
   advisor?: Advisor;
   /** how many episodes the series bot should deliver, when known */
   expectedEpisodes?(job: CrawlJob): Promise<number | undefined>;
@@ -66,6 +68,8 @@ export async function runJob(job: CrawlJob, deps: EngineDeps): Promise<JobOutcom
     episode: job.episode ?? undefined,
     quality: job.quality ?? undefined,
   };
+  const why = await deps.blocked?.(job);
+  if (why) return { status: "not_found", error: why };
   const bots = eligible(await deps.bots(), job.kind);
   if (!bots.length) return { status: "needs_admin", error: "no active bot is set up for this kind of title" };
 

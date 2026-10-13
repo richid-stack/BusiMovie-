@@ -8,6 +8,7 @@ import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 import { GramTransport, screenOfMessage } from "./gramTransport.js";
 import { forwardToVault } from "./vault.js";
 import { verifyDownloadedFile } from "./verify.js";
+import { whyBlocked } from "./blocklist.js";
 import { detectQuality, judgeQuality, labelFor, missingTier } from "./quality.js";
 import { getCrawlerSettings, wantsCompanion } from "./settings.js";
 import { normalizeTitleFuzzy } from "./verify.js";
@@ -67,6 +68,8 @@ async function acquire(media: Screen, job: CrawlJob, botHandle: string, episode?
   if (job.source === "companion" && (qj.quality === "1080p" || qj.quality === "720p") && qj.quality !== job.quality) {
     throw new Error(`the bot sent ${qj.quality} but ${job.quality} was wanted`);
   }
+  const refused = await whyBlocked({ title: job.title, year: job.year, fileName: media.media?.fileName, size: media.media?.size });
+  if (refused) throw new Error(`not stored: ${refused}`);
   const vaultId = await requireVaultChannelId(isSeries);
   const vault = await s.client.getEntity(vaultId);
   const copy = await forwardToVault(s.client, s.botEntity, vault, media.msgId, media.media?.size);
@@ -114,6 +117,7 @@ const engineDeps: EngineDeps = {
   bots: loadBots,
   open: openSession,
   acquire,
+  blocked: (job) => whyBlocked({ title: job.title, year: job.year }),
   advisor: geminiAdvisor,
   onProgress: async (job, eps) => { await progressHook?.(job, eps.length); },
 };

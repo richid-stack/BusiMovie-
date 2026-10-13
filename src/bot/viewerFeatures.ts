@@ -10,6 +10,7 @@ import { db, deleteMediaFile, getMediaFileById, getMovieQualities, setMediaAdded
 import { getAdminTelegramIds, isAdminTelegramId } from "../server/auth.js";
 import { cachedEpisodes } from "../crawler/browse.js";
 import { PRIORITY, submitJob } from "../crawler/service.js";
+import { blockFile } from "../crawler/blocklist.js";
 import { EpisodeBatcher, describeEpisodes, follow, followersOf, isFollowing, listFollows, unfollow } from "./follow.js";
 import { getQualityPref, setQualityPref, type QualityPref } from "./prefs.js";
 import { AUTO_FIX_AT, addReport, clearReports, reportersOf } from "./reports.js";
@@ -56,6 +57,8 @@ export async function repairFile(fileId: number, by: { admin?: boolean } = {}): 
   const f: any = await getMediaFileById(fileId);
   if (!f) return false;
   const reporters = await reportersOf(fileId);
+  // Remember this exact file so the re-fetch (or the channel crawler) can't bring the same bad copy back.
+  await blockFile({ fileName: String(f.file_name || ""), fileSize: Number(f.file_size || 0), title: String(f.movie_title), reason: by.admin ? "removed by admin" : "reported by viewers" }).catch(() => undefined);
   await deleteMediaFile(fileId);
   await clearReports(fileId);
   const isEp = !!(f.season && f.episode);

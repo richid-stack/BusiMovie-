@@ -46,6 +46,9 @@ import { getGateSettings, saveGateSettings, listGateChannels, addGateChannel, up
 import { inspectChannel, ensureInviteLink } from "./src/bot/gateAdmin.js";
 import { workerHealth, probeBot, pressBotButton } from "./src/crawler/service.js";
 import { recentAlerts } from "./src/services/alerts.js";
+import { banViewer, findViewer, getDailyCap, listBans, moderationStats, setDailyCap, takedownTitle, unbanViewer } from "./src/services/moderation.js";
+import { listBlocks, unblock } from "./src/crawler/blocklist.js";
+import { isAdminTelegramId } from "./src/server/auth.js";
 import { addWish, listWishes, updateWish, deleteWish, runWishNow, parseSeriesLine, startWishlistRunner } from "./src/crawler/wishlist.js";
 import { getCrawlerSettings, saveCrawlerSettings } from "./src/crawler/settings.js";
 import { recordView, recentViews, viewKey, purgeOldViews } from "./src/db/views.js";
@@ -1066,6 +1069,40 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ================= SAFETY: takedowns, bans, daily limit, blocklist =================
+  app.get("/api/safety", async (_req, res) => {
+    try {
+      const [cap, stats, bans, blocks] = await Promise.all([getDailyCap(), moderationStats(), listBans(), listBlocks()]);
+      res.json({ cap, stats, bans, blocks });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/safety/cap", async (req, res) => {
+    try { const n = Number(req.body?.cap); if (!Number.isFinite(n) || n < 0 || n > 1000) return res.status(400).json({ error: "Give a number from 0 to 1000 (0 = no limit)." }); await setDailyCap(n); res.json({ cap: await getDailyCap() }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/safety/bans", async (req, res) => {
+    try {
+      const v = await findViewer(String(req.body?.who || ""));
+      if (!v) return res.status(400).json({ error: "Use a Telegram id (digits) or the @username of someone who has used the bot." });
+      if (isAdminTelegramId(Number(v.telegram_id))) return res.status(400).json({ error: "That's an admin account." });
+      await banViewer(v.telegram_id, req.body?.reason ? String(req.body.reason).slice(0, 200) : undefined);
+      res.json({ success: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/safety/bans/:id", async (req, res) => {
+    try { await unbanViewer(req.params.id); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/safety/takedown", async (req, res) => {
+    try {
+      const title = String(req.body?.title || "").trim();
+      if (title.length < 2) return res.status(400).json({ error: "Which title?" });
+      res.json(await takedownTitle({ title, year: req.body?.year ? String(req.body.year).trim() : null, reason: req.body?.reason ? String(req.body.reason).slice(0, 200) : "admin takedown" }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/safety/blocks/:id", async (req, res) => {
+    try { await unblock(Number(req.params.id)); res.json({ success: true }); } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ================= REQUIRED CHANNELS (JOIN GATE) =================

@@ -13,6 +13,7 @@ import { db, addMediaFile } from "../db/index.js";
 import { getConnectedClient, requireVaultChannelId, logActivity } from "../services/crawlerService.js";
 import { forwardToVault } from "./vault.js";
 import { Pacer, tg } from "./flood.js";
+import { whyBlocked } from "./blocklist.js";
 import { alreadyHave, judgePost, type ChannelPost, type HeldRow } from "./ingest.js";
 import { mediaOf } from "./gramTransport.js";
 
@@ -89,6 +90,13 @@ export async function ingestPost(client: any, target: any, source: any, m: any):
     await record(target.id, post.msgId, "skipped", v.reason, post.fileName);
     await bumpSeen(target.id, post.msgId);
     return { status: "skipped", reason: v.reason };
+  }
+
+  const barred = await whyBlocked({ title: v.title, year: v.year, fileName: v.fileName, size: post.size });
+  if (barred) {
+    await record(target.id, post.msgId, "skipped", barred, v.title);
+    await bumpSeen(target.id, post.msgId);
+    return { status: "skipped", reason: barred, title: v.title };
   }
 
   const held = (await db.execute("SELECT movie_title, year, quality, season, episode, file_name, file_size FROM media_files")).rows as unknown as HeldRow[];

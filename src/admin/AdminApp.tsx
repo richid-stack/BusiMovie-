@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import {
-  Activity, Boxes, Film, Inbox, LayoutDashboard, Lock, LogOut, Megaphone, Menu, PlugZap, Radar, Search, Upload, X,
+  Activity, Boxes, Film, Inbox, LayoutDashboard, Lock, LogOut, ShieldAlert, Megaphone, Menu, PlugZap, Radar, Search, Upload, X,
 } from "lucide-react";
 import { Mark } from "../components/Wordmark";
 import { logout } from "../lib/adminAuth";
@@ -20,6 +20,7 @@ const Batch = lazy(() => import("./pages/Batch"));
 const Connections = lazy(() => import("./pages/Connections"));
 const Messaging = lazy(() => import("./pages/Messaging"));
 const Gate = lazy(() => import("./pages/Gate"));
+const Safety = lazy(() => import("./pages/Safety"));
 
 interface NavItem { to: string; label: string; icon: React.ElementType; badge?: "requests" | "jobs"; keywords?: string }
 const GROUPS: Array<{ title?: string; items: NavItem[] }> = [
@@ -44,6 +45,7 @@ const GROUPS: Array<{ title?: string; items: NavItem[] }> = [
     title: "Audience",
     items: [
       { to: "gate", label: "Required channels", icon: Lock, keywords: "join gate subscribe discussion ads sponsor force" },
+      { to: "safety", label: "Safety", icon: ShieldAlert, keywords: "takedown dmca ban block limit abuse cap remove" },
     ],
   },
   {
@@ -294,6 +296,7 @@ function Shell() {
                 <Route path="library" element={<Library />} />
                 <Route path="requests" element={<Requests />} />
                 <Route path="gate" element={<Gate />} />
+                <Route path="safety" element={<Safety />} />
                 <Route path="jobs" element={<CrawlJobs />} />
                 <Route path="bots" element={<SearchBots />} />
                 <Route path="sources" element={<Sources />} />

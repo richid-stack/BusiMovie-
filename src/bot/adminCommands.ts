@@ -19,6 +19,7 @@ import { PRIORITY, submitJob, workerHealth } from "../crawler/service.js";
 import { addWish, listWishes, parseSeriesLine } from "../crawler/wishlist.js";
 import { getGateSettings, listGateChannels, saveGateSettings, gateStats } from "./gate.js";
 import { esc } from "./messages.js";
+import { banViewer, findViewer, getDailyCap, setDailyCap, takedownTitle, unbanViewer } from "../services/moderation.js";
 import { parseMediaTitleAndSeriesInfo } from "../services/seriesParser.js";
 
 const argsOf = (ctx: any) => String(ctx.message?.text || "").replace(/^\/\w+(@\w+)?\s*/, "").trim();
@@ -103,6 +104,9 @@ export function installAdminCommands(bot: Telegraf) {
       "/wishlist: wishlist progress",
       "/requests: what viewers want",
       "/gate: required channels",
+      "/takedown <i>title</i>: remove a title everywhere and block it for good",
+      "/ban <i>id or @name</i> [reason], /unban <i>id or @name</i>",
+      "/cap <i>number</i>: files per viewer per day (0 = no limit)",
       "/broadcast <i>text</i>: message every viewer",
     ].join("\n"), { parse_mode: "HTML" });
   }));
@@ -190,5 +194,58 @@ export function installAdminCommands(bot: Telegraf) {
     await ctx.answerCbQuery(on ? "Viewers will be asked to join." : "Gate is off.");
     const v = await gateView();
     await ctx.editMessageText(v.text, { parse_mode: "HTML", ...v.keyboard }).catch(() => undefined);
+  });
+
+  // ── moderation
+  bot.command("ban", admin(async (ctx) => {
+    const [ref, ...rest] = argsOf(ctx).split(/\s+/);
+    const v = ref ? await findViewer(ref) : null;
+    if (!v) return void (await ctx.reply("Tell me who, e.g. <code>/ban 123456789 spamming</code> or <code>/ban @name</code>. @names only work for people who have used the bot.", { parse_mode: "HTML" }));
+    if (isAdminTelegramId(Number(v.telegram_id))) return void (await ctx.reply("That's an admin. I won't ban them."));
+    await banViewer(v.telegram_id, rest.join(" ") || undefined);
+    await ctx.reply(`🚫 Banned ${esc(v.username ? "@" + v.username : v.first_name || v.telegram_id)}. Undo with /unban ${v.telegram_id}`);
+  }));
+  bot.command("unban", admin(async (ctx) => {
+    const v = await findViewer(argsOf(ctx));
+    if (!v) return void (await ctx.reply("Tell me who, e.g. <code>/unban 123456789</code>", { parse_mode: "HTML" }));
+    await unbanViewer(v.telegram_id);
+    await ctx.reply(`✅ ${esc(v.username ? "@" + v.username : v.telegram_id)} can use the bot again.`);
+  }));
+  bot.command("cap", admin(async (ctx) => {
+    const raw = argsOf(ctx);
+    if (!raw) { const c = await getDailyCap(); return void (await ctx.reply(c ? `Each viewer can get ${c} file${c === 1 ? "" : "s"} a day. Change it with /cap 10, or /cap 0 for no limit.` : "No daily limit is set. Set one with /cap 10.")); }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0 || n > 1000) return void (await ctx.reply("Give me a number, e.g. /cap 10 (0 = no limit)."));
+    await setDailyCap(n);
+    await ctx.reply(n ? `✅ Each viewer can now get ${Math.floor(n)} file${Math.floor(n) === 1 ? "" : "s"} a day.` : "✅ No daily limit.");
+  }));
+
+  const pendingTakedowns = new Map<string, { title: string; year: string | null; at: number }>();
+  bot.command("takedown", admin(async (ctx) => {
+    const raw = argsOf(ctx);
+    if (!raw) return void (await ctx.reply("Which title? e.g. <code>/takedown Some Movie 2019</code>", { parse_mode: "HTML" }));
+    const p = parseMediaTitleAndSeriesInfo(raw);
+    const title = p.cleanTitle || raw;
+    const token = Math.random().toString(36).slice(2, 8);
+    pendingTakedowns.set(token, { title, year: p.year || null, at: Date.now() });
+    await ctx.reply(`⚠️ Remove <b>${esc(title)}</b>${p.year ? ` (${esc(p.year)})` : ""} everywhere? This deletes every file of it (including the vault copies), cancels its jobs and blocks it from ever being fetched again.`, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("🗑 Yes, take it down", `adm_td_${token}`), Markup.button.callback("Cancel", `adm_tdx_${token}`)]]),
+    });
+  }));
+  bot.action(/^adm_tdx_(\w+)$/, async (ctx, next) => {
+    if (!isAdminTelegramId(ctx.from?.id)) return next();
+    pendingTakedowns.delete(ctx.match[1]);
+    await ctx.answerCbQuery("Cancelled.");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => undefined);
+  });
+  bot.action(/^adm_td_(\w+)$/, async (ctx, next) => {
+    if (!isAdminTelegramId(ctx.from?.id)) return next();
+    const t = pendingTakedowns.get(ctx.match[1]);
+    if (!t || Date.now() - t.at > 10 * 60_000) return void (await ctx.answerCbQuery("That expired. Run /takedown again.", { show_alert: true }));
+    pendingTakedowns.delete(ctx.match[1]);
+    await ctx.answerCbQuery("Working on it…");
+    const r = await takedownTitle({ title: t.title, year: t.year, reason: "admin takedown" });
+    await ctx.editMessageText(`🗑 <b>${esc(t.title)}</b> taken down: ${r.removedFiles} file${r.removedFiles === 1 ? "" : "s"} removed${r.vaultErrors ? ` (${r.vaultErrors} vault cop${r.vaultErrors === 1 ? "y" : "ies"} could not be deleted, check the vault channel)` : ""}, ${r.cancelledJobs} job${r.cancelledJobs === 1 ? "" : "s"} cancelled. It won't be fetched again.`, { parse_mode: "HTML" }).catch(() => undefined);
   });
 }
