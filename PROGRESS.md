@@ -106,7 +106,7 @@ Storefront design preview with demo data: open `/?demo=1` (add `&nosplash` to sk
 5. Optional later: mirror mode, persisted learned advisor rules.
 
 ## Do these yourself
-- Rotate/revoke the Telegram userbot session that was committed earlier; purge it from git history.
+- Revoke the Telegram userbot session that was committed earlier (Telegram → Settings → Devices → terminate it), then sign the userbot in again under Admin → Connections. It has already been purged from the GitHub history (history rewritten 2026-10-13); also delete `settings_backup.json` from any old AI Studio copy of the project.
 - Set secrets in AI Studio: `ADMIN_PASSWORD`, `ADMIN_TELEGRAM_IDS`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `TELEGRAM_USER_SESSION` (the session is no longer mirrored anywhere).
 - Firestore is no longer used at all; you can delete the Firestore database / rules in the Firebase console.
 - Start the bot once from your own Telegram account (admin ids in `ADMIN_TELEGRAM_IDS`) so it can send you alerts.
